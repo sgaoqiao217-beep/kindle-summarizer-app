@@ -656,7 +656,7 @@ def best_effort_summarize(chapter_title: str, chapter_text: str) -> str:
 # =========================
 st.set_page_config(page_title="Kindle書籍 自動要約ツール (MVP)", layout="wide")
 
-st.title("📚 Kindle書籍 自動要約ツール")
+st.title("📚 Kindle書籍 自動要約ツール1")
 st.caption("画像アップロード → 並べ替え → OCR → 章/固定長分割 → 要約 → Googleドキュメント出力 まで")
 
 with st.sidebar:
