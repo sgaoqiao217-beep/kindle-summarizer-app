@@ -1,0 +1,6 @@
+[server]
+runOnSave = true
+
+[client]
+# 省略可：変更検知の方式はデフォルト auto でOK
+# fileWatcherType = "watchdog"  # 明示したい場合のみ

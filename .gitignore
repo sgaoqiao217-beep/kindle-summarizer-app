@@ -1,0 +1,60 @@
+# ------------------------
+# macOS
+# ------------------------
+.DS_Store
+
+# ------------------------
+# VSCode
+# ------------------------
+.vscode/
+.settings/
+.project
+.classpath
+
+# ------------------------
+# Python
+# ------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+.python-version
+
+# test / Coverage
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.pytest_cache/
+.hypothesis/
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+
+# ------------------------
+# JetBrains / PyCharm
+# ------------------------
+.idea/
+*.iml
+
+
+# ------------------------
+# log files
+# ------------------------
+data/logs/*
+
+images/*
+
+*.json
