@@ -496,19 +496,6 @@ def _pick_text(d: Dict[str, Any]) -> str:
     v = d.get("full_text_annotation", {}).get("text") if isinstance(d.get("full_text_annotation"), dict) else None
     return v.strip() if isinstance(v, str) else ""
 
-def _assert_sa(client):
-    transport = getattr(client, "transport", None)
-    creds = getattr(transport, "_credentials", None)
-    if creds is None:
-        raise RuntimeError("credentials が載っていません。")
-    from google.oauth2.service_account import Credentials as SA
-    import google.auth.compute_engine.credentials as GCE
-    if isinstance(creds, GCE.Credentials):
-        raise RuntimeError("ADC(GCE metadata) を使っています。SA に切替えてください。")
-    if not isinstance(creds, SA):
-        st.warning(f"想定外の認証タイプです: {type(creds)}")
-
-
 # =========================
 # OCR
 # =========================
@@ -792,7 +779,6 @@ if st.session_state.images:
 st.subheader("Step 3. OCR & info抽出")
 if st.session_state.images:
     client = get_vision_client(uploaded_key)
-    _assert_sa(client)
     if st.button("OCRを実行", type="primary", use_container_width=True):
         results = []
         prog = st.progress(0.0, text="OCR処理中…")

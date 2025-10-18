@@ -26,15 +26,15 @@ CLIENT_SECRET = os.path.join(
 def get_credentials():
     """OAuth 認証を行い、Google API の認証情報を返す"""
     # 1) サービスアカウント資格情報を Secrets から読み込み
-    # raw = st.secrets["gcp"]["service_account"]
-    # info = json.loads(raw) if isinstance(raw, str) else raw  # TOMLは文字列のことが多い
-    # creds = service_account.Credentials.from_service_account_info(info)
+    raw = st.secrets["GOOGLE_CREDENTIALS"]
+    info = json.loads(raw) if isinstance(raw, str) else raw  # TOMLは文字列のことが多い
+    creds = service_account.Credentials.from_service_account_info(info)
     # project_id = info.get("project_id")
     # if project_id:
     #     creds = creds.with_quota_project(project_id)
 
-    flow = InstalledAppFlow.from_client_secrets_file(CLIENT_SECRET, SCOPES)
-    creds = flow.run_local_server(port=0)
+    # flow = InstalledAppFlow.from_client_secrets_file(CLIENT_SECRET, SCOPES)
+    # creds = flow.run_local_server(port=0)
     return creds
 
 
