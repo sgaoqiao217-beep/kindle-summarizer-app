@@ -505,7 +505,8 @@ def get_vision_client(json_key_path: Optional[str] = None):
     if json_key_path:
         os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = json_key_path
     from google.cloud import vision
-    return vision.ImageAnnotatorClient()
+    creds = get_google_credentials()
+    return vision.ImageAnnotatorClient(credentials=creds,)
 
 def _extract_with_vision(img_path: str, client) -> Dict[str, Any]:
     from google.cloud import vision
