@@ -2,6 +2,10 @@
 import re
 from googleapiclient.discovery import build
 from google_auth_oauthlib.flow import InstalledAppFlow
+import json
+import streamlit as st
+from google.oauth2 import service_account
+from google.cloud import vision
 import os
 from dotenv import load_dotenv
 load_dotenv()
@@ -21,8 +25,13 @@ CLIENT_SECRET = os.path.join(
 
 def get_credentials():
     """OAuth 認証を行い、Google API の認証情報を返す"""
-    flow = InstalledAppFlow.from_client_secrets_file(CLIENT_SECRET, SCOPES)
-    creds = flow.run_local_server(port=0)
+    # 1) サービスアカウント資格情報を Secrets から読み込み
+    raw = st.secrets["gcp"]["service_account"]
+    info = json.loads(raw) if isinstance(raw, str) else raw  # TOMLは文字列のことが多い
+    creds = service_account.Credentials.from_service_account_info(info)
+
+    # flow = InstalledAppFlow.from_client_secrets_file(CLIENT_SECRET, SCOPES)
+    # creds = flow.run_local_server(port=0)
     return creds
 
 
