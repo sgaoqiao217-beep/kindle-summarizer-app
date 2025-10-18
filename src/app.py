@@ -1,6 +1,7 @@
 import io
 import os
 import re
+import json
 import tempfile
 import unicodedata
 from datetime import datetime
@@ -44,6 +45,8 @@ try:
     # ↑ ユーザ環境の関数名に合わせてお好みで
 except Exception:
     extract_info_external = None
+
+from google.oauth2 import service_account
 
 load_dotenv()
 
@@ -505,7 +508,10 @@ def get_vision_client(json_key_path: Optional[str] = None):
     if json_key_path:
         os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = json_key_path
     from google.cloud import vision
-    return vision.ImageAnnotatorClient()
+    credentials_info = json.loads(st.secrets["GOOGLE_CREDENTIALS"])
+    credentials = service_account.Credentials.from_service_account_info(credentials_info)
+    client = vision.ImageAnnotatorClient(credentials=credentials)
+    return client
 
 def _extract_with_vision(img_path: str, client) -> Dict[str, Any]:
     from google.cloud import vision
