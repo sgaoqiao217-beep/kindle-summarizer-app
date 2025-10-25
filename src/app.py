@@ -33,6 +33,85 @@ try:
 except Exception:
     get_google_credentials = None
     create_google_doc_external = None
+# --- Fallback for google_api_utils が無い環境 ---
+if get_google_credentials is None or create_google_doc_external is None:
+    import json
+    from google.oauth2 import service_account
+    # googleapiclient.build は app.py 先頭で try-import 済み（build が None の可能性あり）
+
+    def get_google_credentials():
+        """Secretsに入れたサービスアカウントJSONからDocs/Drive権限でCredentialsを作る"""
+        raw = st.secrets["GOOGLE_CREDENTIALS"]  # secrets.toml に JSON 全文を入れる運用
+        info = json.loads(raw) if isinstance(raw, str) else raw
+        scopes = [
+            "https://www.googleapis.com/auth/documents",
+            "https://www.googleapis.com/auth/drive",
+        ]
+        creds = service_account.Credentials.from_service_account_info(info, scopes=scopes)
+        return creds
+
+    def _ensure_folder_path(drive_service, parts):
+        """['OCR結果','書籍タイトル'] のようなパスをDrive上に作成して親IDを返す"""
+        parent_id = None
+        for name in parts:
+            q = "mimeType='application/vnd.google-apps.folder' and name='%s'" % name.replace("'", r"\'")
+            if parent_id:
+                q += f" and '{parent_id}' in parents"
+            res = drive_service.files().list(q=q, fields="files(id,name)", pageSize=1).execute()
+            items = res.get("files", [])
+            if items:
+                parent_id = items[0]["id"]
+            else:
+                meta = {"name": name, "mimeType": "application/vnd.google-apps.folder"}
+                if parent_id:
+                    meta["parents"] = [parent_id]
+                created = drive_service.files().create(body=meta, fields="id").execute()
+                parent_id = created["id"]
+        return parent_id
+
+    def create_google_doc_external(book_title: str, chapter_title: str, text: str, creds, root_name: str = "OCR結果"):
+        if build is None:
+            raise ImportError("googleapiclient が必要です。`pip install google-api-python-client` を実行してください。")
+        docs = build("docs", "v1", credentials=creds)
+        drive = build("drive", "v3", credentials=creds)
+
+        # Driveの保存先を用意: OCR結果/書籍タイトル
+        folder_id = _ensure_folder_path(drive, [root_name, book_title])
+
+        # ドキュメント作成
+        doc_title = f"{book_title}（{chapter_title}）"
+        doc = docs.documents().create(body={"title": doc_title}).execute()
+        doc_id = doc["documentId"]
+
+        # 1行目を見出し2にして本文を挿入（重複見出しを避ける）
+        heading = (chapter_title or "無題").strip()
+        body_text = (text or "").lstrip()
+        first = (body_text.splitlines() or [""])[0].strip()
+        if first == f"## {heading}":
+            body_text = "\n".join(body_text.splitlines()[1:]).lstrip()
+
+        content = f"{heading}\n\n{body_text}".rstrip() + "\n"
+        requests = [
+            {"insertText": {"location": {"index": 1}, "text": content}},
+            {
+                "updateParagraphStyle": {
+                    "range": {"startIndex": 1, "endIndex": 1 + len(heading) + 1},
+                    "paragraphStyle": {"namedStyleType": "HEADING_2"},
+                    "fields": "namedStyleType",
+                }
+            },
+        ]
+        docs.documents().batchUpdate(documentId=doc_id, body={"requests": requests}).execute()
+
+        # 作成直後はマイドライブ直下なので、保存先フォルダへ移動
+        meta = drive.files().get(fileId=doc_id, fields="parents").execute()
+        prev = ",".join(meta.get("parents", []))
+        drive.files().update(
+            fileId=doc_id, addParents=folder_id, removeParents=prev, fields="id, parents"
+        ).execute()
+
+        return doc_id
+# --- Fallback ここまで ---
 
 # Optional: 既存モジュールがあれば使う（無ければImportErrorを握りつぶしてフォールバック）
 try:
@@ -373,13 +452,13 @@ def _make_part_summary_doc_name(idx: int) -> str:
 
 
 def _get_cached_google_credentials():
-    if get_google_credentials is None:
-        raise RuntimeError("google_api_utils が見つからないためGoogle認証を利用できません。")
+    # ここで get_google_credentials が None の可能性はない（上のフォールバックで定義済み）
     creds = st.session_state.get("google_creds")
     if creds is None:
         creds = get_google_credentials()
         st.session_state.google_creds = creds
     return creds
+
 
 def _extract_drive_folder_id(raw_value: str) -> Optional[str]:
     if not raw_value:
