@@ -35,6 +35,12 @@ def get_credentials():
 
     # flow = InstalledAppFlow.from_client_secrets_file(CLIENT_SECRET, SCOPES)
     # creds = flow.run_local_server(port=0)
+    try:
+        info_project = info.get("project_id")
+        st.write(f"SA email: {info.get('client_email')}")
+        st.write(f"SA project_id (from JSON): {info_project}")
+    except Exception:
+        pass
     return creds
 
 
