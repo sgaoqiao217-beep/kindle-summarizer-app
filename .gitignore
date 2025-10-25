@@ -58,3 +58,5 @@ data/logs/*
 images/*
 
 *.json
+
+old/*

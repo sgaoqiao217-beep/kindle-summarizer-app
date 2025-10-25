@@ -1,14 +1,8 @@
 #### Google Docs/Drive 認証 & 出力
-import re
 from googleapiclient.discovery import build
-from google_auth_oauthlib.flow import InstalledAppFlow
 import json
 import streamlit as st
 from google.oauth2 import service_account
-from google.cloud import vision
-import os
-from dotenv import load_dotenv
-load_dotenv()
 
 
 SCOPES = [
@@ -16,15 +10,8 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 
-# google_api_utils.py のあるディレクトリを基準にして1つ上（OCRTool/）へ移動
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-CLIENT_SECRET = os.path.join(
-    BASE_DIR,
-    os.getenv("CLIENT_KEY")
-)
-
 def get_credentials():
-    """OAuth 認証を行い、Google API の認証情報を返す"""
+    """サービスアカウントの資格情報（Docs/Driveスコープ）を返す"""
     # 1) サービスアカウント資格情報を Secrets から読み込み
     raw = st.secrets["GOOGLE_CREDENTIALS"]
     info = json.loads(raw) if isinstance(raw, str) else raw  # TOMLは文字列のことが多い
@@ -44,16 +31,20 @@ def get_credentials():
     return creds
 
 
-from googleapiclient.discovery import build
-
 def get_or_create_folder(service, name, parent_id=None):
     """
     Google Drive 上でフォルダを取得、存在しなければ作成
     """
-    query = f"mimeType='application/vnd.google-apps.folder' and name='{name}'"
+    safe = name.replace("'", r"\'")
+    query = f"mimeType='application/vnd.google-apps.folder' and name='{safe}' and trashed=false"
     if parent_id:
         query += f" and '{parent_id}' in parents"
-    results = service.files().list(q=query, fields="files(id, name)").execute()
+
+    results = service.files().list(q=query, 
+                                   fields="files(id, name)",
+                                   supportsAllDrives=True,
+                                   includeItemsFromAllDrives=True
+                                   ).execute()
     items = results.get("files", [])
 
     if items:
@@ -67,7 +58,9 @@ def get_or_create_folder(service, name, parent_id=None):
     if parent_id:
         metadata["parents"] = [parent_id]
 
-    folder = service.files().create(body=metadata, fields="id").execute()
+    folder = service.files().create(body=metadata, fields="id",
+                                    supportsAllDrives=True 
+                                    ).execute()
     return folder["id"]
 
 
@@ -100,14 +93,21 @@ def create_google_doc(book_title: str, chapter_title: str, text: str, creds, roo
 
     # --- ドキュメントを目的フォルダへ“完全に移動” ---
     # 既存の親（通常は root）を取得して removeParents で外し、addParents に目的フォルダを指定
-    file_meta = drive_service.files().get(fileId=doc_id, fields="parents").execute()
-    prev_parents = ",".join(file_meta.get("parents", []))
-    drive_service.files().update(
+    file_meta = drive_service.files().get(
         fileId=doc_id,
-        addParents=book_folder_id,
-        removeParents=prev_parents,
-        fields="id, parents"
+        fields="parents",
+        supportsAllDrives=True
     ).execute()
+    prev_ids = file_meta.get("parents", [])
+    update_kwargs = {
+        "fileId": doc_id,
+        "addParents": book_folder_id,
+        "fields": "id, parents",
+        "supportsAllDrives": True,
+    }
+    if prev_ids:
+        update_kwargs["removeParents"] = ",".join(prev_ids)
+    drive_service.files().update(**update_kwargs).execute()
 
     # --- 本文挿入（章タイトル=見出し2 → 本文の順で一括） ---
     heading = f"{chapter_title}\n"
