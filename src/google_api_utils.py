@@ -28,7 +28,7 @@ def get_credentials():
     # 1) サービスアカウント資格情報を Secrets から読み込み
     raw = st.secrets["GOOGLE_CREDENTIALS"]
     info = json.loads(raw) if isinstance(raw, str) else raw  # TOMLは文字列のことが多い
-    creds = service_account.Credentials.from_service_account_info(info)
+    creds = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
     # project_id = info.get("project_id")
     # if project_id:
     #     creds = creds.with_quota_project(project_id)
