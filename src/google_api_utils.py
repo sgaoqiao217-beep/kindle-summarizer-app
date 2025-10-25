@@ -72,47 +72,29 @@ def ensure_folder_path(drive_service, path_parts):
     return parent_id
 
 def create_google_doc(book_title: str, chapter_title: str, text: str, creds, root_name: str = "OCR結果"):
-    """
-    Google Docs に新規ドキュメントを作成し、章タイトル(=見出し2)と本文を挿入。
-    出力先は Google Drive の `root_name/book_title/` 配下に配置する。
-    - 見出しの正規表現判定はしない（split段階で章は確定しているため）
-    - 挿入は1回の insertText と1回の updateParagraphStyle で最小化
-    - Drive 上の完全移動のため removeParents を使用
-    """
-    # --- サービス生成（大量作成する場合は外で使い回すとさらに高速） ---
     docs_service = build("docs", "v1", credentials=creds)
     drive_service = build("drive", "v3", credentials=creds)
 
-    # --- フォルダ構成の用意 ---
+    # 1) 保存先フォルダを用意
     book_folder_id = ensure_folder_path(drive_service, [root_name, book_title])
 
-    # --- ドキュメント作成 ---
+    # 2) Google ドキュメントを「Drive API で」作成（親フォルダを最初から指定）
     doc_name = f"{book_title} ({chapter_title})"
-    doc = docs_service.documents().create(body={"title": doc_name}).execute()
-    doc_id = doc["documentId"]
-
-    # --- ドキュメントを目的フォルダへ“完全に移動” ---
-    # 既存の親（通常は root）を取得して removeParents で外し、addParents に目的フォルダを指定
-    file_meta = drive_service.files().get(
-        fileId=doc_id,
-        fields="parents",
+    file_meta = {
+        "name": doc_name,
+        "mimeType": "application/vnd.google-apps.document",
+        "parents": [book_folder_id],  # ← これで最初から目的フォルダに作成できる
+    }
+    created = drive_service.files().create(
+        body=file_meta,
+        fields="id, parents",
         supportsAllDrives=True
     ).execute()
-    prev_ids = file_meta.get("parents", [])
-    update_kwargs = {
-        "fileId": doc_id,
-        "addParents": book_folder_id,
-        "fields": "id, parents",
-        "supportsAllDrives": True,
-    }
-    if prev_ids:
-        update_kwargs["removeParents"] = ",".join(prev_ids)
-    drive_service.files().update(**update_kwargs).execute()
+    doc_id = created["id"]
 
-    # --- 本文挿入（章タイトル=見出し2 → 本文の順で一括） ---
+    # 3) 本文を Docs API で挿入（先頭を見出し2に）
     heading = f"{chapter_title}\n"
     body_text = ""
-
     if text:
         lines = text.splitlines()
         if lines and lines[0].startswith("## "):
@@ -129,9 +111,7 @@ def create_google_doc(book_title: str, chapter_title: str, text: str, creds, roo
     content = heading + body_text if body_text else heading
 
     requests = [
-        # 本文先頭（index=1）にまとめて挿入
         {"insertText": {"location": {"index": 1}, "text": content}},
-        # 先頭段落（章タイトル）だけ HEADING_2 に変更
         {
             "updateParagraphStyle": {
                 "range": {"startIndex": 1, "endIndex": 1 + len(heading)},
@@ -145,21 +125,16 @@ def create_google_doc(book_title: str, chapter_title: str, text: str, creds, roo
     if body_text:
         cursor = 1 + len(heading)
         for line in body_text.splitlines(keepends=True):
-            line_without_newline = line.rstrip("\n")
-            if line_without_newline.strip() in special_heading_titles:
-                requests.append(
-                    {
-                        "updateParagraphStyle": {
-                            "range": {
-                                "startIndex": cursor,
-                                "endIndex": cursor + len(line),
-                            },
-                            "paragraphStyle": {"namedStyleType": "HEADING_2"},
-                            "fields": "namedStyleType",
-                        }
+            if line.rstrip("\n").strip() in special_heading_titles:
+                requests.append({
+                    "updateParagraphStyle": {
+                        "range": {"startIndex": cursor, "endIndex": cursor + len(line)},
+                        "paragraphStyle": {"namedStyleType": "HEADING_2"},
+                        "fields": "namedStyleType",
                     }
-                )
+                })
             cursor += len(line)
+
     docs_service.documents().batchUpdate(documentId=doc_id, body={"requests": requests}).execute()
 
     print(f"{doc_name}: https://docs.google.com/document/d/{doc_id}/edit")
