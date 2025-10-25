@@ -8,11 +8,24 @@ from google.cloud import vision
 from googleapiclient.discovery import build
 from google_auth_oauthlib.flow import InstalledAppFlow
 from dotenv import load_dotenv
+from google.oauth2 import service_account
+import streamlit as st
+
+
+def _vision_client_from_secrets():
+    raw = st.secrets["GOOGLE_CREDENTIALS"]
+    info = json.loads(raw) if isinstance(raw, str) else raw
+    scopes = ["https://www.googleapis.com/auth/cloud-platform"]
+    creds = service_account.Credentials.from_service_account_info(info, scopes=scopes)
+    project_id = info.get("project_id")
+    if project_id:
+        creds = creds.with_quota_project(project_id)
+    return vision.ImageAnnotatorClient(credentials=creds)
 
 """画像から Title, Body, Left, Right を抽出して dict で返す"""
 def extract_info_type1(image_path: str):
 
-    client = vision.ImageAnnotatorClient()
+    client = _vision_client_from_secrets()
     with open(image_path, "rb") as f:
         content = f.read()
     image = vision.Image(content=content)
