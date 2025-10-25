@@ -125,7 +125,7 @@ try:
     # ↑ ユーザ環境の関数名に合わせてお好みで
 except Exception:
     extract_info_external = None
-    
+
 
 from google.oauth2 import service_account
 
@@ -592,8 +592,8 @@ def get_vision_client(json_key_path: Optional[str] = None):
     from google.cloud import vision
     credentials_info = json.loads(st.secrets["GOOGLE_CREDENTIALS"])
     credentials = service_account.Credentials.from_service_account_info(credentials_info)
-    #client = vision.ImageAnnotatorClient(credentials=credentials)
-    client = _vision_client_from_secrets(credentials=credentials)
+    client = vision.ImageAnnotatorClient(credentials=credentials)
+    # client = _vision_client_from_secrets(credentials=credentials)
     
     return client
 
