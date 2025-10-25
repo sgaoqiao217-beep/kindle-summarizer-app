@@ -585,17 +585,44 @@ def _pick_text(d: Dict[str, Any]) -> str:
 # OCR
 # =========================
 @st.cache_resource(show_spinner=False)
+# def get_vision_client(json_key_path: Optional[str] = None):
+#     # json_key_pathが指定されていれば一時的に環境変数を差し替え（セッション存続中のみ）
+#     if json_key_path:
+#         os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = json_key_path
+#     from google.cloud import vision
+#     credentials_info = json.loads(st.secrets["GOOGLE_CREDENTIALS"])
+#     st.write(credentials_info)
+#     credentials = service_account.Credentials.from_service_account_info(credentials_info)
+#     client = vision.ImageAnnotatorClient(credentials=credentials)
+#     # client = _vision_client_from_secrets(credentials=credentials)
+    
+#     return client
+
 def get_vision_client(json_key_path: Optional[str] = None):
-    # json_key_pathが指定されていれば一時的に環境変数を差し替え（セッション存続中のみ）
     if json_key_path:
         os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = json_key_path
+
+    # ← 追加（環境変数で quota project が勝手に付くのを防ぐ）
+    for k in ("GOOGLE_CLOUD_QUOTA_PROJECT", "GOOGLE_CLOUD_PROJECT", "GCLOUD_PROJECT"):
+        os.environ.pop(k, None)
+
     from google.cloud import vision
-    credentials_info = json.loads(st.secrets["GOOGLE_CREDENTIALS"])
-    credentials = service_account.Credentials.from_service_account_info(credentials_info)
+    import json
+    from google.oauth2 import service_account
+
+    raw = st.secrets["GOOGLE_CREDENTIALS"]
+    credentials_info = json.loads(raw) if isinstance(raw, str) else raw
+
+    # スコープを明示して作る（推奨）
+    scopes = ["https://www.googleapis.com/auth/cloud-platform"]
+    credentials = service_account.Credentials.from_service_account_info(credentials_info, scopes=scopes)
+
+    # ★ ここで with_quota_project は付けない（今は不要）
+    # credentials = credentials.with_quota_project("sunny-advantage-471612-v1")
+
     client = vision.ImageAnnotatorClient(credentials=credentials)
-    # client = _vision_client_from_secrets(credentials=credentials)
-    
     return client
+
 
 def _extract_with_vision(img_path: str, client) -> Dict[str, Any]:
     from google.cloud import vision
