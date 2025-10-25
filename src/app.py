@@ -460,9 +460,10 @@ def _get_cached_google_credentials():
     return creds
 
 
-def _extract_drive_folder_id(raw_value: str) -> Optional[str]:
+def normalize_drive_folder_input(raw_value: str) -> str:
+    """DriveのフォルダURLから folderId を抽出。IDならそのまま返す。"""
     if not raw_value:
-        return None
+        return raw_value
     raw_value = raw_value.strip()
     match = re.search(r"/folders/([a-zA-Z0-9_-]+)", raw_value)
     if match:
@@ -812,7 +813,7 @@ with st.expander("Googleドライブから取得", expanded=False):
         placeholder="例: https://drive.google.com/drive/folders/xxxxxxxxxxxxxxxxx",
     )
     if st.button("フォルダ内の画像を読み込む", use_container_width=True):
-        folder_id = _extract_drive_folder_id(drive_folder_value)
+        folder_id = normalize_drive_folder_input(drive_folder_value)
         if not folder_id:
             st.warning("フォルダIDまたはURLを入力してください。")
         else:
