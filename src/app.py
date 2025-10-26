@@ -5,7 +5,8 @@ import json
 import tempfile
 import unicodedata
 from datetime import datetime
-from typing import List, Dict, Any, Tuple, Optional
+from typing import List, Dict, Any, Tuple, Optional, Set
+from pdf_utils import register_jp_font, build_pdf_bytes
 
 import streamlit as st
 from PIL import Image
@@ -20,21 +21,18 @@ except Exception:
 
 try:
     from googleapiclient.discovery import build
-    from googleapiclient.http import MediaIoBaseDownload
+    from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 except Exception:
     build = None
     MediaIoBaseDownload = None
+    MediaIoBaseUpload = None
 
 try:
-    from google_api_utils import (
-        get_credentials as get_google_credentials,
-        create_google_doc as create_google_doc_external,
-    )
+    from google_api_utils import get_credentials as get_google_credentials
 except Exception:
     get_google_credentials = None
-    create_google_doc_external = None
 # --- Fallback for google_api_utils が無い環境 ---
-if get_google_credentials is None or create_google_doc_external is None:
+if get_google_credentials is None:
     import json
     from google.oauth2 import service_account
     # googleapiclient.build は app.py 先頭で try-import 済み（build が None の可能性あり）
@@ -50,67 +48,7 @@ if get_google_credentials is None or create_google_doc_external is None:
         creds = service_account.Credentials.from_service_account_info(info, scopes=scopes)
         return creds
 
-    def _ensure_folder_path(drive_service, parts):
-        """['OCR結果','書籍タイトル'] のようなパスをDrive上に作成して親IDを返す"""
-        parent_id = None
-        for name in parts:
-            q = "mimeType='application/vnd.google-apps.folder' and name='%s'" % name.replace("'", r"\'")
-            if parent_id:
-                q += f" and '{parent_id}' in parents"
-            res = drive_service.files().list(q=q, fields="files(id,name)", pageSize=1).execute()
-            items = res.get("files", [])
-            if items:
-                parent_id = items[0]["id"]
-            else:
-                meta = {"name": name, "mimeType": "application/vnd.google-apps.folder"}
-                if parent_id:
-                    meta["parents"] = [parent_id]
-                created = drive_service.files().create(body=meta, fields="id").execute()
-                parent_id = created["id"]
-        return parent_id
 
-    def create_google_doc_external(book_title: str, chapter_title: str, text: str, creds, root_name: str = "OCR結果"):
-        if build is None:
-            raise ImportError("googleapiclient が必要です。`pip install google-api-python-client` を実行してください。")
-        docs = build("docs", "v1", credentials=creds)
-        drive = build("drive", "v3", credentials=creds)
-
-        # Driveの保存先を用意: OCR結果/書籍タイトル
-        folder_id = _ensure_folder_path(drive, [root_name, book_title])
-
-        # ドキュメント作成
-        doc_title = f"{book_title}（{chapter_title}）"
-        doc = docs.documents().create(body={"title": doc_title}).execute()
-        doc_id = doc["documentId"]
-
-        # 1行目を見出し2にして本文を挿入（重複見出しを避ける）
-        heading = (chapter_title or "無題").strip()
-        body_text = (text or "").lstrip()
-        first = (body_text.splitlines() or [""])[0].strip()
-        if first == f"## {heading}":
-            body_text = "\n".join(body_text.splitlines()[1:]).lstrip()
-
-        content = f"{heading}\n\n{body_text}".rstrip() + "\n"
-        requests = [
-            {"insertText": {"location": {"index": 1}, "text": content}},
-            {
-                "updateParagraphStyle": {
-                    "range": {"startIndex": 1, "endIndex": 1 + len(heading) + 1},
-                    "paragraphStyle": {"namedStyleType": "HEADING_2"},
-                    "fields": "namedStyleType",
-                }
-            },
-        ]
-        docs.documents().batchUpdate(documentId=doc_id, body={"requests": requests}).execute()
-
-        # 作成直後はマイドライブ直下なので、保存先フォルダへ移動
-        meta = drive.files().get(fileId=doc_id, fields="parents").execute()
-        prev = ",".join(meta.get("parents", []))
-        drive.files().update(
-            fileId=doc_id, addParents=folder_id, removeParents=prev, fields="id, parents"
-        ).execute()
-
-        return doc_id
 # --- Fallback ここまで ---
 
 # Optional: 既存モジュールがあれば使う（無ければImportErrorを握りつぶしてフォールバック）
@@ -130,6 +68,9 @@ except Exception:
 from google.oauth2 import service_account
 
 load_dotenv()
+
+FONT_NAME = "NotoSansJP"
+FONT_PATH = os.path.join("assets", "NotoSansCJKjp-Regular.otf")
 
 # 句点や括弧で段落/文末を判断するための安全な終端記号セット
 _JP_SENT_END = "。．！？!?" + "」』）】］》〉"
@@ -348,109 +289,107 @@ def summarize_text(formatted_text: str, chapter_title: str) -> str:
 
     return final_text
 
-def _build_google_doc_content(sections: List[Tuple[str, str]]) -> str:
+
+def _ensure_folder_path(drive_service, parts: List[str]) -> Optional[str]:
+    """['OCR結果','書籍タイトル'] のようなパスをDrive上に作成して親IDを返す。"""
+    parent_id = None
+    for name in parts:
+        safe = (name or "").replace("'", r"\'")
+        q = "mimeType='application/vnd.google-apps.folder' and name='%s'" % safe
+        if parent_id:
+            q += f" and '{parent_id}' in parents"
+        res = drive_service.files().list(q=q, fields="files(id,name)", pageSize=1).execute()
+        items = res.get("files", [])
+        if items:
+            parent_id = items[0]["id"]
+            continue
+        meta = {"name": name, "mimeType": "application/vnd.google-apps.folder"}
+        if parent_id:
+            meta["parents"] = [parent_id]
+        created = drive_service.files().create(body=meta, fields="id").execute()
+        parent_id = created["id"]
+    return parent_id
+
+def _prepare_pdf_sections(sections: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
     """
-    Googleドキュメント用に章ごとの本文を連結。
+    PDF生成向けに (heading, body) タプル配列をサニタイズ。
+    先頭行が '## heading' の形式になっている要約テキストは除去して本文だけにする。
     """
-    blocks: List[str] = []
-    for raw_title, raw_body in sections:
-        heading = raw_title.strip() or "無題"
+    prepared: List[Tuple[str, str]] = []
+    for raw_heading, raw_body in sections:
+        heading = (raw_heading or "無題").strip() or "無題"
         body = (raw_body or "").strip()
         if body.startswith("##"):
             body_lines = body.splitlines()
-            first_line = body_lines[0].strip()
-            normalized_heading = f"## {heading}"
-            if first_line == normalized_heading:
+            expected = f"## {heading}"
+            if body_lines and body_lines[0].strip() == expected:
                 body_lines = body_lines[1:]
                 while body_lines and not body_lines[0].strip():
                     body_lines.pop(0)
                 body = "\n".join(body_lines).strip()
-        block_parts = [heading]
-        if body:
-            block_parts.append(body)
-        blocks.append("\n".join(block_parts))
-    return "\n\n\n".join(blocks).strip() or "本文がありません。"
+        prepared.append((heading, body))
+    return prepared
+
+
+def _summaries_as_sections(
+    chapters: List[Tuple[str, str]],
+    summaries: Dict[str, str],
+) -> List[Tuple[str, str]]:
+    """
+    章リストに沿って要約dictを並べ替え、欠損はスキップしつつ残りを末尾に追加。
+    """
+    sections: List[Tuple[str, str]] = []
+    seen: Set[str] = set()
+    for heading, _ in chapters:
+        summary = summaries.get(heading)
+        if summary:
+            sections.append((heading, summary))
+            seen.add(heading)
+    for heading, summary in summaries.items():
+        if heading in seen:
+            continue
+        sections.append((heading, summary))
+    return sections
 
 def _get_drive_service(creds):
     if build is None:
         raise ImportError("googleapiclient がインストールされていません。`pip install google-api-python-client` を実行してください。")
     return build("drive", "v3", credentials=creds)
 
-def _find_folder_id(service, name: str, parent_id: Optional[str]) -> Optional[str]:
-    """親ID直下にある name のフォルダIDをひとつ返す（最初の一致）。親なしの場合はマイドライブ直下を検索。"""
-    # Drive の query は単引用符で囲むので、単引用符はバックスラッシュでエスケープ
-    safe_name = (name or "").replace("'", "\\'")
-    name_q = "name = '{}'".format(safe_name)
-    mime_q = "mimeType = 'application/vnd.google-apps.folder'"
-    trashed_q = "trashed = false"
-
-    if parent_id:
-        parent_q = f"'{parent_id}' in parents"
-        q = f"{name_q} and {mime_q} and {trashed_q} and {parent_q}"
-    else:
-        q = f"{name_q} and {mime_q} and {trashed_q}"
-
-    res = service.files().list(q=q, fields="files(id, name, parents)").execute()
-    files = res.get("files", [])
-    if not files:
-        return None
-    if parent_id:
-        return files[0]["id"]
-    return files[0]["id"]
-
-def _resolve_book_folder_id(creds, root_name: str, book_title: str) -> Optional[str]:
-    """root_name/book_title のフォルダIDを推定して返す（存在しなければ None）。"""
+def ensure_pdf_font_registered(font_name: str, font_path: str) -> Tuple[bool, Optional[str]]:
+    """
+    ReportLab に日本語フォントを登録。成功可否とエラーメッセージ（あれば）を返す。
+    """
+    if st.session_state.get("pdf_font_registered"):
+        return True, None
+    if not os.path.exists(font_path):
+        return False, f"フォントファイルが見つかりません: {font_path}"
     try:
-        service = _get_drive_service(creds)
-        root_id = _find_folder_id(service, root_name, parent_id=None)
-        if not root_id:
-            return None
-        book_id = _find_folder_id(service, book_title, parent_id=root_id)
-        return book_id
-    except Exception:
-        return None
-
-def _folder_url(folder_id: str) -> str:
-    return f"https://drive.google.com/drive/folders/{folder_id}"
-
-def _search_url(book_title: str) -> str:
-    # 見つからなかったときの保険として検索URLを提示
-    from urllib.parse import quote
-    return f"https://drive.google.com/drive/search?q={quote(book_title)}"
+        register_jp_font(font_name, font_path)
+    except RuntimeError as e:
+        return False, str(e)
+    st.session_state.pdf_font_registered = True
+    return True, None
 
 
-def _build_single_doc_content(heading: str, body: str) -> str:
+def _upload_pdf_to_drive(
+    creds,
+    *,
+    file_name: str,
+    file_bytes: bytes,
+    parent_folder_id: Optional[str],
+):
     """
-    1つのパートを1つのGoogle Docに書き出すための本文を生成。
-    body 先頭に '## 見出し' が付いている場合は重複しないよう除去。
+    PDFファイルを Google Drive にアップロードし、file metadata を返す。
     """
-    h = (heading or "無題").strip()
-    b = (body or "").strip()
-
-    if b.startswith("##"):
-        lines = b.splitlines()
-        if lines and lines[0].strip() == f"## {h}":
-            lines = lines[1:]
-            while lines and not lines[0].strip():
-                lines.pop(0)
-            b = "\n".join(lines).strip()
-
-    return f"{h}\n\n{b}" if b else h
-
-
-def _make_part_doc_name(idx: int) -> str:
-    """
-    ドキュメント名（Part 01.doc など）
-    Googleドキュメント自体はネイティブ形式ですが、名前に .doc を含めても問題ありません。
-    """
-    return f"Part {idx:02d}.doc"
-
-def _make_part_summary_doc_name(idx: int) -> str:
-    """
-    要約用のドキュメント名（Part1 _要約.doc など）
-    ※ 数字はゼロ埋めしない／Part と数字の間は詰める／数字の後に半角スペース＋"_要約.doc"
-    """
-    return f"Part{idx} _要約.doc"
+    if build is None or MediaIoBaseUpload is None:
+        raise ImportError("googleapiclient がインストールされていません。`pip install google-api-python-client` を実行してください。")
+    service = build("drive", "v3", credentials=creds)
+    media = MediaIoBaseUpload(io.BytesIO(file_bytes), mimetype="application/pdf", resumable=False)
+    metadata: Dict[str, Any] = {"name": file_name, "mimeType": "application/pdf"}
+    if parent_folder_id:
+        metadata["parents"] = [parent_folder_id]
+    return service.files().create(body=metadata, media_body=media, fields="id, webViewLink").execute()
 
 
 def _get_cached_google_credentials():
@@ -1030,124 +969,167 @@ if st.session_state.chapters:
                 #st.markdown(f"## {title}")
                 st.write(summ)
 
-# Step 6: エクスポート
-st.subheader("Step 6. エクスポート")
-if st.session_state.summaries:
-    st.write("Googleドキュメントに出力します。初回はブラウザでGoogle認証が求められます。")
+# Step 6: PDFエクスポート
+st.subheader("Step 6. PDFエクスポート")
+
+has_chapters = bool(st.session_state.chapters)
+has_summaries = bool(st.session_state.summaries)
+
+if not (has_chapters or has_summaries):
+    st.info("Step 4 で分割した本文または Step 5 の要約ができあがると PDF を生成できます。")
+else:
+    st.caption("Google Docs を使わずに PDF を生成します。必要に応じて Google Drive へもアップロードできます。")
     default_book_title = st.session_state.get("book_title_input", "Kindle書籍")
-    default_root = st.session_state.get("drive_root_input", "OCR結果")
-    book_title_input = st.text_input("書籍タイトル（Googleドキュメント名に使用）", value=default_book_title)
-    drive_root_input = st.text_input("Google Driveの保存先ルートフォルダ", value=default_root)
-    st.session_state.book_title_input = book_title_input
-    st.session_state.drive_root_input = drive_root_input
-
-    st.markdown("**出力方法**")
-    export_mode = st.radio(
-        "Googleドキュメントの作り方",
-        ["1本にまとめる（従来）", "パートごとに分割する（Part 01.doc / Part 02.doc ...）"],
-        horizontal=False,
-        index=1,  # 既定で「分割」
+    book_title_input = st.text_input(
+        "書籍タイトル（PDF内タイトル／Driveフォルダ名）",
+        value=default_book_title,
+        key="book_title_input",
     )
-    split_summaries = st.checkbox("要約もパートごとに個別ドキュメントで出力する", value=True)
+    st.session_state.book_title_input = book_title_input
+    safe_book_title = book_title_input.strip() or "Kindle書籍"
 
-    if st.button("Googleドキュメントを作成", type="primary", use_container_width=True):
-        if create_google_doc_external is None or get_google_credentials is None:
-            st.error("google_api_utils.py が利用できないため、Googleドキュメント出力に対応していません。")
-        else:
-            try:
-                creds = st.session_state.get("google_creds")
-                if creds is None:
-                    with st.spinner("Googleアカウント認証中…"):
-                        creds = get_google_credentials()
-                    st.session_state.google_creds = creds
+    drive_upload_enabled = st.checkbox(
+        "生成したPDFをGoogle Driveにもアップロードする",
+        value=st.session_state.get("drive_upload_enabled", False),
+        key="drive_upload_enabled",
+    )
 
-                # 章/パート候補（Step4の結果が無ければ全文を1件として扱う）
-                chapters_for_doc = (
-                    st.session_state.chapters
-                    if st.session_state.chapters
-                    else [("本文", st.session_state.full_text or "")]
+    drive_root_value = st.session_state.get("drive_root_input", "OCR結果")
+    if drive_upload_enabled:
+        drive_root_value = st.text_input(
+            "Driveの保存先ルートフォルダ",
+            value=drive_root_value,
+            key="drive_root_input",
+        )
+    st.session_state.drive_root_input = drive_root_value
+
+    drive_available = drive_upload_enabled and build is not None and MediaIoBaseUpload is not None
+    if drive_upload_enabled and not drive_available:
+        st.warning("Google Drive へのアップロードには google-api-python-client が必要です。requirements.txt を確認してください。")
+
+    font_ok, font_err = ensure_pdf_font_registered(FONT_NAME, FONT_PATH)
+    if not font_ok:
+        st.error(font_err or "PDFフォントの初期化に失敗しました。assets ディレクトリに日本語フォント（.otf/.ttf）を配置してください。")
+
+    tab_labels: List[str] = []
+    tab_kinds: List[str] = []
+    if has_chapters:
+        tab_labels.append("本文PDF")
+        tab_kinds.append("body")
+    if has_summaries:
+        tab_labels.append("要約PDF")
+        tab_kinds.append("summary")
+
+    tabs = st.tabs(tab_labels) if tab_labels else []
+
+    for tab, kind in zip(tabs, tab_kinds):
+        with tab:
+            if not font_ok:
+                st.info("フォントが登録できないため PDF を生成できません。")
+                continue
+
+            if kind == "body":
+                base_sections = st.session_state.chapters or [("本文", st.session_state.full_text or "")]
+                sections = _prepare_pdf_sections(base_sections)
+                if not any(body for _, body in sections):
+                    st.warning("本文が空です。Step 3〜4 の結果を確認してください。")
+                    continue
+
+                pdf_title = st.text_input(
+                    "PDFタイトル",
+                    value=st.session_state.get("body_pdf_title", f"{safe_book_title}（本文）"),
+                    key="body_pdf_title",
+                )
+                file_name_input = st.text_input(
+                    "ファイル名（.pdf）",
+                    value=st.session_state.get("body_pdf_filename", f"{safe_book_title}_本文.pdf"),
+                    key="body_pdf_filename",
+                )
+                file_name = file_name_input.strip() or "document.pdf"
+                if not file_name.lower().endswith(".pdf"):
+                    file_name += ".pdf"
+
+                pdf_bytes = build_pdf_bytes(title=pdf_title, chapters=sections, font_name=FONT_NAME)
+                st.download_button(
+                    "本文PDFをダウンロード",
+                    data=pdf_bytes,
+                    file_name=file_name,
+                    mime="application/pdf",
+                    key="download_body_pdf",
                 )
 
-                if export_mode.startswith("1本にまとめる"):
-                    # 従来のまとめ書き出し
-                    full_content = _build_google_doc_content(chapters_for_doc)
-                    summary_sections = list(st.session_state.summaries.items())
-                    summary_content = _build_google_doc_content(summary_sections)
-
-                    with st.spinner("文章全体のドキュメントを作成中…"):
-                        create_google_doc_external(
-                            book_title_input,
-                            "文章全体",
-                            full_content,
-                            creds,
-                            root_name=drive_root_input or "OCR結果",
-                        )
-                    with st.spinner("要約ドキュメントを作成中…"):
-                        create_google_doc_external(
-                            book_title_input,
-                            "要約",
-                            summary_content,
-                            creds,
-                            root_name=drive_root_input or "OCR結果",
-                        )
-                    st.success("Googleドキュメントの作成が完了しました。Google Drive をご確認ください。")
-                    # ▼ ここから：フォルダリンク表示
-                    folder_id = _resolve_book_folder_id(creds, drive_root_input or "OCR結果", book_title_input)
-                    if folder_id:
-                        st.markdown(f"📂 保存先フォルダ: [{book_title_input}]({_folder_url(folder_id)})")
-                    else:
-                        st.markdown(
-                            "📂 保存先フォルダを自動特定できませんでした。"
-                            f" 検索はこちら → [{book_title_input}]({_search_url(book_title_input)})"
-                        )
-
-                else:
-                    # ★ パートごとに分割して書き出し ★
-                    total = len(chapters_for_doc)
-
-                    # 本文の分割出力
-                    with st.spinner("パートごとの本文ドキュメントを作成中…"):
-                        for idx, (title, body) in enumerate(chapters_for_doc, start=1):
-                            doc_name = _make_part_doc_name(idx)  # 例: Part 01.doc
-                            content = _build_single_doc_content(title, body)
-                            create_google_doc_external(
-                                book_title_input,
-                                doc_name,
-                                content,
-                                creds,
-                                root_name=drive_root_input or "OCR結果",
-                            )
-
-                    # 要約の分割出力（任意）
-                    if split_summaries and st.session_state.summaries:
-                        with st.spinner("パートごとの要約ドキュメントを作成中…"):
-                            for idx, (title, _) in enumerate(chapters_for_doc, start=1):
-                                summary_text = st.session_state.summaries.get(title)
-                                if not summary_text:
-                                    continue  # そのタイトルの要約が無い場合はスキップ
-                                # 要約は見出し重複を避けつつ、タイトル行は本文化しておく
-                                content = _build_single_doc_content(title, summary_text)
-                                doc_name = _make_part_summary_doc_name(idx)  # 例: Part 01.doc
-                                # 要約と本文で同名にしたくない場合は下行に変更例：
-                                # doc_name = f"Part {idx:02d}（要約）.doc"
-                                create_google_doc_external(
-                                    book_title_input,
-                                    doc_name,
-                                    content,
+                if drive_upload_enabled:
+                    upload_disabled = not drive_available
+                    if st.button("Drive にアップロード", key="upload_body_pdf", disabled=upload_disabled):
+                        try:
+                            creds = _get_cached_google_credentials()
+                            drive_service = _get_drive_service(creds)
+                            folder_parts = [drive_root_value or "OCR結果"]
+                            folder_parts.append(safe_book_title)
+                            folder_id = _ensure_folder_path(drive_service, folder_parts)
+                            with st.spinner("Drive にアップロード中…"):
+                                meta = _upload_pdf_to_drive(
                                     creds,
-                                    root_name=drive_root_input or "OCR結果/要約",
+                                    file_name=file_name,
+                                    file_bytes=pdf_bytes,
+                                    parent_folder_id=folder_id,
                                 )
+                            link = meta.get("webViewLink")
+                            if link:
+                                st.success(f"アップロード完了: {link}")
+                            else:
+                                st.success("アップロード完了。Google Drive を確認してください。")
+                        except Exception as e:
+                            st.error(f"Drive へのアップロードに失敗しました: {e}")
+            else:
+                summary_sections = _summaries_as_sections(st.session_state.chapters or [], st.session_state.summaries)
+                summary_sections = _prepare_pdf_sections(summary_sections)
+                if not summary_sections:
+                    st.info("要約結果がありません。")
+                    continue
 
-                    st.success(f"パート分割の作成が完了しました（{total}件）。Google Drive をご確認ください。")
-                    # ▼ ここから：フォルダリンク表示
-                    folder_id = _resolve_book_folder_id(creds, drive_root_input or "OCR結果", book_title_input)
-                    if folder_id:
-                        st.markdown(f"📂 保存先フォルダ: [{book_title_input}]({_folder_url(folder_id)})")
-                    else:
-                        st.markdown(
-                            "📂 保存先フォルダを自動特定できませんでした。"
-                            f" 検索はこちら → [{book_title_input}]({_search_url(book_title_input)})"
-                        )
+                pdf_title = st.text_input(
+                    "PDFタイトル",
+                    value=st.session_state.get("summary_pdf_title", f"{safe_book_title}（要約）"),
+                    key="summary_pdf_title",
+                )
+                file_name_input = st.text_input(
+                    "ファイル名（.pdf）",
+                    value=st.session_state.get("summary_pdf_filename", f"{safe_book_title}_要約.pdf"),
+                    key="summary_pdf_filename",
+                )
+                file_name = file_name_input.strip() or "summary.pdf"
+                if not file_name.lower().endswith(".pdf"):
+                    file_name += ".pdf"
 
-            except Exception as e:
-                st.error(f"Googleドキュメントの作成に失敗しました: {e}")
+                pdf_bytes = build_pdf_bytes(title=pdf_title, chapters=summary_sections, font_name=FONT_NAME)
+                st.download_button(
+                    "要約PDFをダウンロード",
+                    data=pdf_bytes,
+                    file_name=file_name,
+                    mime="application/pdf",
+                    key="download_summary_pdf",
+                )
+
+                if drive_upload_enabled:
+                    upload_disabled = not drive_available
+                    if st.button("Drive にアップロード", key="upload_summary_pdf", disabled=upload_disabled):
+                        try:
+                            creds = _get_cached_google_credentials()
+                            drive_service = _get_drive_service(creds)
+                            folder_parts = [drive_root_value or "OCR結果", safe_book_title, "要約"]
+                            folder_id = _ensure_folder_path(drive_service, folder_parts)
+                            with st.spinner("Drive にアップロード中…"):
+                                meta = _upload_pdf_to_drive(
+                                    creds,
+                                    file_name=file_name,
+                                    file_bytes=pdf_bytes,
+                                    parent_folder_id=folder_id,
+                                )
+                            link = meta.get("webViewLink")
+                            if link:
+                                st.success(f"アップロード完了: {link}")
+                            else:
+                                st.success("アップロード完了。Google Drive を確認してください。")
+                        except Exception as e:
+                            st.error(f"Drive へのアップロードに失敗しました: {e}")
