@@ -874,22 +874,15 @@ with st.expander("Googleドライブから取得", expanded=False):
 # Step 2: 並び替え（ファイル名/時刻ベース）
 st.subheader("Step 2. ページ順に並び替え")
 if st.session_state.images:
-    colA, colB = st.columns([1,1])
-    with colA:
-        st.write("並び替え方式")
-        how = st.radio("ルール", ["あなたの`normalize_filenames`を使用", "MVP内の簡易ルール"], horizontal=False)
-    with colB:
-        if st.button("並び替えを実行", use_container_width=True):
-            if how == "あなたの`normalize_filenames`を使用" and normalize_filenames_external:
-                sorted_list = normalize_filenames_external(st.session_state.workdir)
-                # ↑ あなたの関数の返り値仕様に合わせて調整が必要な場合あり
-                # ここではworkdir内をリネーム→再取得を想定
-                st.session_state.images = [os.path.join(st.session_state.workdir, f) for f in os.listdir(st.session_state.workdir)]
-                st.session_state.images = normalize_filenames_local(st.session_state.images)
-            else:
-                st.session_state.images = normalize_filenames_local(st.session_state.images)
-            st.success("並び替え完了")
-    st.caption("※ プロジェクトの命名規則が厳密に決まっている場合は、外部関数の呼び出しを優先してください。")
+    if st.button("並び替えを実行", use_container_width=True):
+        if normalize_filenames_external:
+            normalize_filenames_external(st.session_state.workdir)
+            # ↑ あなたの関数の返り値仕様に合わせて調整が必要な場合あり
+            # ここではworkdir内をリネーム→再取得を想定
+            st.session_state.images = [os.path.join(st.session_state.workdir, f) for f in os.listdir(st.session_state.workdir)]
+        st.session_state.images = normalize_filenames_local(st.session_state.images)
+        st.success("並び替え完了")
+    # st.caption("※ プロジェクトの命名規則が厳密に決まっている場合は、`normalize_filenames` の実装を調整してください。")
 
 # Step 3: OCR & info抽出
 st.subheader("Step 3. OCR & info抽出")
