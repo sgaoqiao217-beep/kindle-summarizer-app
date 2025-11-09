@@ -68,5 +68,8 @@ screenshots/*
 check.py
 
 app_error_personalAccount.py
+app_serviceAccount.py
 
-seacret.toml
+../.streamlit/secrets.toml
+
+

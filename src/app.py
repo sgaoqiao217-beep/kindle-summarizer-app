@@ -562,6 +562,23 @@ def _download_drive_images(creds, file_entries: List[Dict[str, str]], dest_dir: 
         saved_paths.append(dest_path)
     return saved_paths
 
+def _log_drive_identity_once(creds):
+    """Drive APIで現在の認証ユーザーを一度だけ表示"""
+    if st.session_state.get("whoami_logged"):
+        return
+    try:
+        from googleapiclient.discovery import build
+        me = build("drive", "v3", credentials=creds).about().get(
+            fields="user(emailAddress)"
+        ).execute()
+        email = me["user"]["emailAddress"]
+        st.info(f"Google Drive として実行中: **{email}**")
+        st.session_state.whoami_logged = True
+    except Exception as e:
+        st.warning(f"認証ユーザー表示に失敗しました: {e}")
+        st.session_state.whoami_logged = True  # 失敗してもループ防止
+
+
 # =========================
 # Utility
 # =========================
@@ -1086,9 +1103,11 @@ if st.session_state.summaries:
                 creds = st.session_state.get("google_creds")
                 if creds is None:
                     with st.spinner("Googleアカウント認証中…"):
-                        creds = get_google_credentials()
+                        # creds = get_google_credentials()
+                        creds = get_google_credentials(use_user_oauth=True)
                     st.session_state.google_creds = creds
-
+                _log_drive_identity_once(creds)
+                
                 # 章/パート候補（Step4の結果が無ければ全文を1件として扱う）
                 chapters_for_doc = (
                     st.session_state.chapters
