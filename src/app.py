@@ -26,6 +26,11 @@ except Exception:
     MediaIoBaseDownload = None
 
 try:
+    from google_auth_oauthlib.flow import InstalledAppFlow
+except Exception:
+    InstalledAppFlow = None
+
+try:
     from google_api_utils import (
         get_credentials as get_google_credentials,
         create_google_doc as create_google_doc_external,
@@ -35,20 +40,50 @@ except Exception:
     create_google_doc_external = None
 # --- Fallback for google_api_utils が無い環境 ---
 if get_google_credentials is None or create_google_doc_external is None:
-    import json
     from google.oauth2 import service_account
     # googleapiclient.build は app.py 先頭で try-import 済み（build が None の可能性あり）
 
-    def get_google_credentials():
-        """Secretsに入れたサービスアカウントJSONからDocs/Drive権限でCredentialsを作る"""
+    _SERVICE_ACCOUNT_SCOPES = [
+        "https://www.googleapis.com/auth/documents",
+        "https://www.googleapis.com/auth/drive",
+    ]
+
+    _USER_OAUTH_SCOPES = [
+        "https://www.googleapis.com/auth/drive.file",
+        "https://www.googleapis.com/auth/documents",
+    ]
+
+    def _load_json_secret(raw):
+        return json.loads(raw) if isinstance(raw, str) else raw
+
+    def _get_service_account_credentials():
         raw = st.secrets["GOOGLE_CREDENTIALS"]  # secrets.toml に JSON 全文を入れる運用
-        info = json.loads(raw) if isinstance(raw, str) else raw
-        scopes = [
-            "https://www.googleapis.com/auth/documents",
-            "https://www.googleapis.com/auth/drive",
-        ]
-        creds = service_account.Credentials.from_service_account_info(info, scopes=scopes)
+        info = _load_json_secret(raw)
+        return service_account.Credentials.from_service_account_info(info, scopes=_SERVICE_ACCOUNT_SCOPES)
+
+    def _get_user_oauth_creds():
+        if InstalledAppFlow is None:
+            raise ImportError("google-auth-oauthlib が必要です。`pip install google-auth-oauthlib` を実行してください。")
+        if "google_oauth" not in st.secrets:
+            raise KeyError("st.secrets['google_oauth'] が設定されていません")
+        section = st.secrets["google_oauth"]
+        try:
+            client_json = section["client_json"]
+        except Exception as exc:
+            raise KeyError("st.secrets['google_oauth']['client_json'] が設定されていません") from exc
+        config = _load_json_secret(client_json)
+        flow = InstalledAppFlow.from_client_config(config, _USER_OAUTH_SCOPES)
+        creds = flow.run_local_server(port=0)
+        st.write("Using user OAuth credentials (files count toward your Drive quota).")
         return creds
+
+    def get_google_credentials(use_user_oauth: bool | None = None):
+        """Secretsに応じてサービスアカウント or OAuth を選択"""
+        if use_user_oauth is None:
+            use_user_oauth = "google_oauth" in st.secrets
+        if use_user_oauth:
+            return _get_user_oauth_creds()
+        return _get_service_account_credentials()
 
     def _ensure_folder_path(drive_service, parts):
         """['OCR結果','書籍タイトル'] のようなパスをDrive上に作成して親IDを返す"""

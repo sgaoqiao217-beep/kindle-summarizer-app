@@ -3,25 +3,48 @@ from googleapiclient.discovery import build
 import json
 import streamlit as st
 from google.oauth2 import service_account
+from google_auth_oauthlib.flow import InstalledAppFlow
 
 
-SCOPES = [
+SERVICE_ACCOUNT_SCOPES = [
     "https://www.googleapis.com/auth/documents",
     "https://www.googleapis.com/auth/drive",
 ]
 
-def get_credentials():
-    """サービスアカウントの資格情報（Docs/Driveスコープ）を返す"""
-    # 1) サービスアカウント資格情報を Secrets から読み込み
-    raw = st.secrets["GOOGLE_CREDENTIALS"]
-    info = json.loads(raw) if isinstance(raw, str) else raw  # TOMLは文字列のことが多い
-    creds = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
-    # project_id = info.get("project_id")
-    # if project_id:
-    #     creds = creds.with_quota_project(project_id)
+USER_OAUTH_SCOPES = [
+    "https://www.googleapis.com/auth/drive.file",
+    "https://www.googleapis.com/auth/documents",
+]
 
-    # flow = InstalledAppFlow.from_client_secrets_file(CLIENT_SECRET, SCOPES)
-    # creds = flow.run_local_server(port=0)
+
+def _load_json_secret(raw):
+    return json.loads(raw) if isinstance(raw, str) else raw
+
+
+def get_user_oauth_creds():
+    """OAuth でユーザ本人として Drive/Docs にアクセスする"""
+    if "google_oauth" not in st.secrets:
+        raise KeyError("st.secrets['google_oauth'] が見つかりません")
+    oauth_conf = st.secrets["google_oauth"]
+    try:
+        client_json = oauth_conf["client_json"]
+    except Exception as exc:
+        raise KeyError("st.secrets['google_oauth']['client_json'] が設定されていません") from exc
+
+    if not client_json:
+        raise KeyError("st.secrets['google_oauth']['client_json'] が設定されていません")
+
+    config = _load_json_secret(client_json)
+    flow = InstalledAppFlow.from_client_config(config, USER_OAUTH_SCOPES)
+    creds = flow.run_local_server(port=0)
+    st.write("Using user OAuth credentials (files count toward your Drive quota).")
+    return creds
+
+
+def _get_service_account_credentials():
+    raw = st.secrets["GOOGLE_CREDENTIALS"]
+    info = _load_json_secret(raw)
+    creds = service_account.Credentials.from_service_account_info(info, scopes=SERVICE_ACCOUNT_SCOPES)
     try:
         info_project = info.get("project_id")
         st.write(f"SA email: {info.get('client_email')}")
@@ -29,6 +52,15 @@ def get_credentials():
     except Exception:
         pass
     return creds
+
+
+def get_credentials(use_user_oauth: bool | None = None):
+    """Docs/Drive 用の資格情報を返す（google_oauth があればユーザOAuthを優先）"""
+    if use_user_oauth is None:
+        use_user_oauth = "google_oauth" in st.secrets
+    if use_user_oauth:
+        return get_user_oauth_creds()
+    return _get_service_account_credentials()
 
 
 def get_or_create_folder(service, name, parent_id=None):
