@@ -128,6 +128,8 @@ except Exception:
 
 
 from google.oauth2 import service_account
+from google_auth_oauthlib.flow import Flow
+from google.oauth2.credentials import Credentials as UserCredentials
 
 load_dotenv()
 
@@ -581,47 +583,92 @@ def _pick_text(d: Dict[str, Any]) -> str:
     v = d.get("full_text_annotation", {}).get("text") if isinstance(d.get("full_text_annotation"), dict) else None
     return v.strip() if isinstance(v, str) else ""
 
+SCOPES_VISION = ["https://www.googleapis.com/auth/cloud-platform"]
+# 必要なら固定。課金先を明示したいときのみ指定。
+QUOTA_PROJECT_ID = None  # 例: "sunny-advantage-471612-v1"
+REDIRECT_URI = "https://kindle-summarizer-app2.streamlit.app/oauth2callback"
+
+
+def _load_oauth_client_config() -> dict:
+    # st.secrets は2パターン対応:
+    # A) google_oauth.client_json に JSON 文字列を置いている
+    # B) 分割保存（client_id/client_secret/...）
+    import json as _json
+
+    sec = st.secrets.get("google_oauth", {})
+    if "client_json" in sec:
+        return _json.loads(sec["client_json"])
+    # 分割構成を組み立て
+    return {
+        "web": {
+            "client_id": sec["client_id"],
+            "client_secret": sec["client_secret"],
+            "auth_uri": sec.get("auth_uri", "https://accounts.google.com/o/oauth2/auth"),
+            "token_uri": sec.get("token_uri", "https://oauth2.googleapis.com/token"),
+            "redirect_uris": [sec.get("redirect_uri", REDIRECT_URI)],
+            "javascript_origins": sec.get("javascript_origins", []),
+        }
+    }
+
+
+def _get_user_credentials_for_vision() -> UserCredentials:
+    # 1) 既存トークンは session_state から再利用
+    if "oauth_creds_vision" in st.session_state:
+        info = st.session_state["oauth_creds_vision"]
+        return UserCredentials.from_authorized_user_info(info, SCOPES_VISION)
+
+    # 2) 新規フロー
+    client_config = _load_oauth_client_config()
+    flow = Flow.from_client_config(client_config, scopes=SCOPES_VISION, redirect_uri=REDIRECT_URI)
+
+    code = st.query_params.get("code")
+    state = st.query_params.get("state")
+    # state の検証を使う場合は、authorization_url 生成時に受け取った値を保持して照合すること
+
+    if not code:
+        auth_url, state = flow.authorization_url(
+            access_type="offline",
+            include_granted_scopes=True,
+            prompt="consent",
+        )
+        st.link_button("Googleに接続（Vision）", auth_url, use_container_width=True)
+        st.stop()
+
+    flow.fetch_token(code=code)
+    creds: UserCredentials = flow.credentials
+
+    # 3) 再利用のために保存（refresh_token を含む）
+    st.session_state["oauth_creds_vision"] = {
+        "token": creds.token,
+        "refresh_token": creds.refresh_token,
+        "token_uri": creds.token_uri,
+        "client_id": creds.client_id,
+        "client_secret": creds.client_secret,
+        "scopes": list(creds.scopes),
+    }
+    return creds
+
+
 # =========================
 # OCR
 # =========================
 @st.cache_resource(show_spinner=False)
-# def get_vision_client(json_key_path: Optional[str] = None):
-#     # json_key_pathが指定されていれば一時的に環境変数を差し替え（セッション存続中のみ）
-#     if json_key_path:
-#         os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = json_key_path
-#     from google.cloud import vision
-#     credentials_info = json.loads(st.secrets["GOOGLE_CREDENTIALS"])
-#     st.write(credentials_info)
-#     credentials = service_account.Credentials.from_service_account_info(credentials_info)
-#     client = vision.ImageAnnotatorClient(credentials=credentials)
-#     # client = _vision_client_from_secrets(credentials=credentials)
-    
-#     return client
-
 def get_vision_client(json_key_path: Optional[str] = None):
-    if json_key_path:
-        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = json_key_path
-
-    # ← 追加（環境変数で quota project が勝手に付くのを防ぐ）
-    for k in ("GOOGLE_CLOUD_QUOTA_PROJECT", "GOOGLE_CLOUD_PROJECT", "GCLOUD_PROJECT"):
+    # SA 用の引数は無視（後方互換のために形だけ残す）
+    for k in (
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "GOOGLE_CLOUD_QUOTA_PROJECT",
+        "GOOGLE_CLOUD_PROJECT",
+        "GCLOUD_PROJECT",
+    ):
         os.environ.pop(k, None)
 
     from google.cloud import vision
-    import json
-    from google.oauth2 import service_account
 
-    raw = st.secrets["GOOGLE_CREDENTIALS"]
-    credentials_info = json.loads(raw) if isinstance(raw, str) else raw
-
-    # スコープを明示して作る（推奨）
-    scopes = ["https://www.googleapis.com/auth/cloud-platform"]
-    credentials = service_account.Credentials.from_service_account_info(credentials_info, scopes=scopes)
-
-    # ★ ここで with_quota_project は付けない（今は不要）
-    # credentials = credentials.with_quota_project("sunny-advantage-471612-v1")
-
-    client = vision.ImageAnnotatorClient(credentials=credentials)
-    return client
+    creds = _get_user_credentials_for_vision()
+    if QUOTA_PROJECT_ID:
+        creds = creds.with_quota_project(QUOTA_PROJECT_ID)
+    return vision.ImageAnnotatorClient(credentials=creds)
 
 
 def _extract_with_vision(img_path: str, client) -> Dict[str, Any]:
