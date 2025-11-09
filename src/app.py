@@ -525,6 +525,17 @@ def _get_delegated_service_account_credentials():
     base = service_account.Credentials.from_service_account_info(info, scopes=_DELEGATED_SA_SCOPES)
     return base.with_subject(subject)
 
+def _get_shared_drive_member_sa_credentials():
+    """共有ドライブのメンバーに追加済みのサービスアカウントで実行する（DWDなし）"""
+    if "GOOGLE_CREDENTIALS" not in st.secrets:
+        raise KeyError("st.secrets['GOOGLE_CREDENTIALS'] が設定されていません")
+    info = _load_secret_dict(st.secrets["GOOGLE_CREDENTIALS"])
+    scopes = [
+        "https://www.googleapis.com/auth/drive.file",   # SAが自分で作成/共有されたファイルに限定
+        "https://www.googleapis.com/auth/documents",
+    ]
+    return service_account.Credentials.from_service_account_info(info, scopes=scopes)
+
 
 def _ensure_drive_docs_creds():
     """Drive/Docs 用資格情報（優先: SA+DWD, フォールバック: ユーザーOAuth）"""
@@ -1214,10 +1225,13 @@ if st.session_state.summaries:
                 st.error("共有ドライブのフォルダURLまたはIDを入力してください。")
                 st.stop()
             try:
-                creds = _ensure_drive_docs_creds()
-                _log_drive_identity_once(creds)
+                # SA（共有ドライブメンバー）で実行
+                creds = _get_shared_drive_member_sa_credentials()
+                _log_drive_identity_once(creds)  # 実行主体メールを表示したいなら残す
+
                 drive_service = build("drive", "v3", credentials=creds)
-                docs_service = build("docs", "v1", credentials=creds)
+                docs_service  = build("docs",  "v1", credentials=creds)
+
                 
                 # 章/パート候補（Step4の結果が無ければ全文を1件として扱う）
                 chapters_for_doc = (
