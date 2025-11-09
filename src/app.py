@@ -487,14 +487,42 @@ def _make_part_summary_doc_name(idx: int) -> str:
     """
     return f"Part{idx} _要約.doc"
 
+def _is_service_account_email(email: str | None) -> bool:
+    return bool(email and email.endswith(".gserviceaccount.com"))
+
+
+def _whoami_email(creds) -> str:
+    """現在の認証ユーザーのメールアドレスを取得"""
+    if build is None:
+        raise ImportError("googleapiclient が必要です。`pip install google-api-python-client` を実行してください。")
+    return (
+        build("drive", "v3", credentials=creds)
+        .about()
+        .get(fields="user(emailAddress)")
+        .execute()["user"]["emailAddress"]
+    )
+
+
+def _ensure_user_oauth_creds():
+    """ユーザーOAuthのcredentialsを必ず返す（SA混入時は再取得）"""
+    creds = st.session_state.get("google_creds")
+    if creds is not None:
+        try:
+            email = _whoami_email(creds)
+            if not _is_service_account_email(email):
+                return creds
+        except Exception:
+            pass  # 壊れたトークン等は取り直す
+
+    with st.spinner("Googleアカウント認証中…"):
+        creds = get_google_credentials(use_user_oauth=True)
+    st.session_state.google_creds = creds
+    return creds
+
 
 def _get_cached_google_credentials():
     # ここで get_google_credentials が None の可能性はない（上のフォールバックで定義済み）
-    creds = st.session_state.get("google_creds")
-    if creds is None:
-        creds = get_google_credentials()
-        st.session_state.google_creds = creds
-    return creds
+    return _ensure_user_oauth_creds()
 
 
 def normalize_drive_folder_input(raw_value: str) -> str:
@@ -567,11 +595,7 @@ def _log_drive_identity_once(creds):
     if st.session_state.get("whoami_logged"):
         return
     try:
-        from googleapiclient.discovery import build
-        me = build("drive", "v3", credentials=creds).about().get(
-            fields="user(emailAddress)"
-        ).execute()
-        email = me["user"]["emailAddress"]
+        email = _whoami_email(creds)
         st.info(f"Google Drive として実行中: **{email}**")
         st.session_state.whoami_logged = True
     except Exception as e:
@@ -1100,12 +1124,7 @@ if st.session_state.summaries:
             st.error("google_api_utils.py が利用できないため、Googleドキュメント出力に対応していません。")
         else:
             try:
-                creds = st.session_state.get("google_creds")
-                if creds is None:
-                    with st.spinner("Googleアカウント認証中…"):
-                        # creds = get_google_credentials()
-                        creds = get_google_credentials(use_user_oauth=True)
-                    st.session_state.google_creds = creds
+                creds = _ensure_user_oauth_creds()
                 _log_drive_identity_once(creds)
                 
                 # 章/パート候補（Step4の結果が無ければ全文を1件として扱う）
