@@ -425,7 +425,12 @@ def _find_folder_id(service, name: str, parent_id: Optional[str]) -> Optional[st
     else:
         q = f"{name_q} and {mime_q} and {trashed_q}"
 
-    res = service.files().list(q=q, fields="files(id, name, parents)").execute()
+    res = service.files().list(
+        q=q,
+        fields="files(id, name, parents)",
+        supportsAllDrives=True,
+        includeItemsFromAllDrives=True,
+    ).execute()
     files = res.get("files", [])
     if not files:
         return None
@@ -487,8 +492,10 @@ def _make_part_summary_doc_name(idx: int) -> str:
     """
     return f"Part{idx} _要約.doc"
 
-def _is_service_account_email(email: str | None) -> bool:
-    return bool(email and email.endswith(".gserviceaccount.com"))
+_DELEGATED_SA_SCOPES = [
+    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/documents",
+]
 
 
 def _whoami_email(creds) -> str:
@@ -503,26 +510,98 @@ def _whoami_email(creds) -> str:
     )
 
 
-def _ensure_user_oauth_creds():
-    """ユーザーOAuthのcredentialsを必ず返す（SA混入時は再取得）"""
+def _load_secret_dict(raw):
+    return json.loads(raw) if isinstance(raw, str) else raw
+
+
+def _get_delegated_service_account_credentials():
+    """Workspace サービスアカウント＋ドメイン全体委任の資格情報を取得"""
+    if "GOOGLE_CREDENTIALS" not in st.secrets:
+        raise KeyError("st.secrets['GOOGLE_CREDENTIALS'] が設定されていません")
+    if "DELEGATED_USER" not in st.secrets:
+        raise KeyError("st.secrets['DELEGATED_USER'] が設定されていません")
+    info = _load_secret_dict(st.secrets["GOOGLE_CREDENTIALS"])
+    subject = st.secrets["DELEGATED_USER"]
+    base = service_account.Credentials.from_service_account_info(info, scopes=_DELEGATED_SA_SCOPES)
+    return base.with_subject(subject)
+
+
+def _ensure_drive_docs_creds():
+    """Drive/Docs 用資格情報（優先: SA+DWD, フォールバック: ユーザーOAuth）"""
     creds = st.session_state.get("google_creds")
     if creds is not None:
-        try:
-            email = _whoami_email(creds)
-            if not _is_service_account_email(email):
-                return creds
-        except Exception:
-            pass  # 壊れたトークン等は取り直す
+        return creds
+
+    try:
+        creds = _get_delegated_service_account_credentials()
+        st.session_state.google_creds = creds
+        st.session_state.google_creds_source = "delegated_sa"
+        return creds
+    except KeyError as missing_conf:
+        st.warning(f"SA+DWD 用の設定が不足しています: {missing_conf}\nユーザーOAuthで再取得します。")
+    except Exception as delegated_error:
+        raise RuntimeError(f"SA+DWD 認証に失敗しました: {delegated_error}") from delegated_error
 
     with st.spinner("Googleアカウント認証中…"):
         creds = get_google_credentials(use_user_oauth=True)
     st.session_state.google_creds = creds
+    st.session_state.google_creds_source = "user_oauth"
     return creds
 
 
 def _get_cached_google_credentials():
     # ここで get_google_credentials が None の可能性はない（上のフォールバックで定義済み）
-    return _ensure_user_oauth_creds()
+    return _ensure_drive_docs_creds()
+
+
+def _create_doc_in_shared_drive(
+    parent_folder_id: str,
+    doc_title: str,
+    content: str,
+    creds,
+    drive_service=None,
+    docs_service=None,
+):
+    """共有ドライブ上の指定フォルダID直下にGoogleドキュメントを新規作成して本文を流し込む"""
+    if build is None:
+        raise ImportError("googleapiclient がインストールされていません。`pip install google-api-python-client` を実行してください。")
+    if not parent_folder_id:
+        raise ValueError("parent_folder_id is required")
+
+    drive = drive_service or build("drive", "v3", credentials=creds)
+    docs = docs_service or build("docs", "v1", credentials=creds)
+
+    file_meta = {
+        "name": doc_title,
+        "mimeType": "application/vnd.google-apps.document",
+        "parents": [parent_folder_id],
+    }
+    created = drive.files().create(
+        body=file_meta,
+        fields="id, parents",
+        supportsAllDrives=True,
+    ).execute()
+    doc_id = created["id"]
+
+    payload = (content or "").rstrip() + "\n"
+    requests = [
+        {"insertText": {"location": {"index": 1}, "text": payload}},
+    ]
+    first_line = payload.splitlines()[0] if payload.strip() else ""
+    if first_line:
+        heading_end = len(first_line) + 1  # 行＋末尾の改行
+        requests.append(
+            {
+                "updateParagraphStyle": {
+                    "range": {"startIndex": 1, "endIndex": heading_end},
+                    "paragraphStyle": {"namedStyleType": "HEADING_2"},
+                    "fields": "namedStyleType",
+                }
+            }
+        )
+
+    docs.documents().batchUpdate(documentId=doc_id, body={"requests": requests}).execute()
+    return doc_id
 
 
 def normalize_drive_folder_input(raw_value: str) -> str:
@@ -552,6 +631,8 @@ def _list_drive_images(creds, folder_id: str) -> List[Dict[str, str]]:
             spaces="drive",
             fields=fields,
             orderBy="name_natural",
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
             pageToken=page_token,
         ).execute()
         files.extend(response.get("files", []))
@@ -1102,11 +1183,16 @@ if st.session_state.chapters:
 # Step 6: エクスポート
 st.subheader("Step 6. エクスポート")
 if st.session_state.summaries:
-    st.write("Googleドキュメントに出力します。初回はブラウザでGoogle認証が求められます。")
+    st.write("Workspace サービスアカウント（ドメイン全体委任）経由で共有ドライブに直接 Googleドキュメントを作成します。")
     default_book_title = st.session_state.get("book_title_input", "Kindle書籍")
-    default_root = st.session_state.get("drive_root_input", "OCR結果")
+    default_root = st.session_state.get("drive_root_input", "")
     book_title_input = st.text_input("書籍タイトル（Googleドキュメント名に使用）", value=default_book_title)
-    drive_root_input = st.text_input("Google Driveの保存先ルートフォルダ", value=default_root)
+    drive_root_input = st.text_input(
+        "共有ドライブの親フォルダURLまたはID",
+        value=default_root,
+        placeholder="https://drive.google.com/drive/folders/0AOW24TOGfUF8Uk9PVA",
+        help="共有ドライブ内の任意フォルダURLを貼り付けるか、フォルダID文字列を入力してください。",
+    )
     st.session_state.book_title_input = book_title_input
     st.session_state.drive_root_input = drive_root_input
 
@@ -1120,12 +1206,18 @@ if st.session_state.summaries:
     split_summaries = st.checkbox("要約もパートごとに個別ドキュメントで出力する", value=True)
 
     if st.button("Googleドキュメントを作成", type="primary", use_container_width=True):
-        if create_google_doc_external is None or get_google_credentials is None:
-            st.error("google_api_utils.py が利用できないため、Googleドキュメント出力に対応していません。")
+        if build is None or get_google_credentials is None:
+            st.error("google_api_utils.py もしくは googleapiclient が利用できないため、Googleドキュメント出力に対応していません。")
         else:
+            parent_folder_id = normalize_drive_folder_input(drive_root_input)
+            if not parent_folder_id:
+                st.error("共有ドライブのフォルダURLまたはIDを入力してください。")
+                st.stop()
             try:
-                creds = _ensure_user_oauth_creds()
+                creds = _ensure_drive_docs_creds()
                 _log_drive_identity_once(creds)
+                drive_service = build("drive", "v3", credentials=creds)
+                docs_service = build("docs", "v1", credentials=creds)
                 
                 # 章/パート候補（Step4の結果が無ければ全文を1件として扱う）
                 chapters_for_doc = (
@@ -1141,31 +1233,25 @@ if st.session_state.summaries:
                     summary_content = _build_google_doc_content(summary_sections)
 
                     with st.spinner("文章全体のドキュメントを作成中…"):
-                        create_google_doc_external(
-                            book_title_input,
-                            "文章全体",
+                        _create_doc_in_shared_drive(
+                            parent_folder_id,
+                            f"{book_title_input}（文章全体）",
                             full_content,
                             creds,
-                            root_name=drive_root_input or "OCR結果",
+                            drive_service=drive_service,
+                            docs_service=docs_service,
                         )
                     with st.spinner("要約ドキュメントを作成中…"):
-                        create_google_doc_external(
-                            book_title_input,
-                            "要約",
+                        _create_doc_in_shared_drive(
+                            parent_folder_id,
+                            f"{book_title_input}（要約）",
                             summary_content,
                             creds,
-                            root_name=drive_root_input or "OCR結果",
+                            drive_service=drive_service,
+                            docs_service=docs_service,
                         )
                     st.success("Googleドキュメントの作成が完了しました。Google Drive をご確認ください。")
-                    # ▼ ここから：フォルダリンク表示
-                    folder_id = _resolve_book_folder_id(creds, drive_root_input or "OCR結果", book_title_input)
-                    if folder_id:
-                        st.markdown(f"📂 保存先フォルダ: [{book_title_input}]({_folder_url(folder_id)})")
-                    else:
-                        st.markdown(
-                            "📂 保存先フォルダを自動特定できませんでした。"
-                            f" 検索はこちら → [{book_title_input}]({_search_url(book_title_input)})"
-                        )
+                    st.markdown(f"📂 保存先フォルダ: [{parent_folder_id}]({_folder_url(parent_folder_id)})")
 
                 else:
                     # ★ パートごとに分割して書き出し ★
@@ -1176,12 +1262,13 @@ if st.session_state.summaries:
                         for idx, (title, body) in enumerate(chapters_for_doc, start=1):
                             doc_name = _make_part_doc_name(idx)  # 例: Part 01.doc
                             content = _build_single_doc_content(title, body)
-                            create_google_doc_external(
-                                book_title_input,
-                                doc_name,
+                            _create_doc_in_shared_drive(
+                                parent_folder_id,
+                                f"{book_title_input}（{doc_name}）",
                                 content,
                                 creds,
-                                root_name=drive_root_input or "OCR結果",
+                                drive_service=drive_service,
+                                docs_service=docs_service,
                             )
 
                     # 要約の分割出力（任意）
@@ -1196,24 +1283,17 @@ if st.session_state.summaries:
                                 doc_name = _make_part_summary_doc_name(idx)  # 例: Part 01.doc
                                 # 要約と本文で同名にしたくない場合は下行に変更例：
                                 # doc_name = f"Part {idx:02d}（要約）.doc"
-                                create_google_doc_external(
-                                    book_title_input,
-                                    doc_name,
+                                _create_doc_in_shared_drive(
+                                    parent_folder_id,
+                                    f"{book_title_input}（{doc_name}）",
                                     content,
                                     creds,
-                                    root_name=drive_root_input or "OCR結果/要約",
+                                    drive_service=drive_service,
+                                    docs_service=docs_service,
                                 )
 
                     st.success(f"パート分割の作成が完了しました（{total}件）。Google Drive をご確認ください。")
-                    # ▼ ここから：フォルダリンク表示
-                    folder_id = _resolve_book_folder_id(creds, drive_root_input or "OCR結果", book_title_input)
-                    if folder_id:
-                        st.markdown(f"📂 保存先フォルダ: [{book_title_input}]({_folder_url(folder_id)})")
-                    else:
-                        st.markdown(
-                            "📂 保存先フォルダを自動特定できませんでした。"
-                            f" 検索はこちら → [{book_title_input}]({_search_url(book_title_input)})"
-                        )
+                    st.markdown(f"📂 保存先フォルダ: [{parent_folder_id}]({_folder_url(parent_folder_id)})")
 
             except Exception as e:
                 st.error(f"Googleドキュメントの作成に失敗しました: {e}")
