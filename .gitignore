@@ -64,3 +64,9 @@ old/*
 app_serviceAccount.py
 
 screenshots/*
+
+check.py
+
+app_error_personalAccount.py
+
+seacret.toml
