@@ -605,16 +605,14 @@ def _ensure_child_folder(drive_service, parent_id: str, folder_name: str) -> str
 def _ensure_export_folder_tree(drive_service, parent_folder_id: str, book_title: str) -> Dict[str, str]:
     """
     共有ドライブ/parent_folder_id 配下に
-    kindle-Export/book_title/{book_title (文章全体), book_title (要約)}
+    book_title/{book_title (文章全体), book_title (要約)}
     を作成して各IDを返す。
     """
     effective_title = (book_title or "").strip() or "Kindle書籍"
-    kindle_root_id = _ensure_child_folder(drive_service, parent_folder_id, "kindle-Export")
-    book_folder_id = _ensure_child_folder(drive_service, kindle_root_id, effective_title)
+    book_folder_id = _ensure_child_folder(drive_service, parent_folder_id, effective_title)
     full_folder_id = _ensure_child_folder(drive_service, book_folder_id, f"{effective_title} (文章全体)")
     summary_folder_id = _ensure_child_folder(drive_service, book_folder_id, f"{effective_title} (要約)")
     return {
-        "kindle_root_id": kindle_root_id,
         "book_folder_id": book_folder_id,
         "full_folder_id": full_folder_id,
         "summary_folder_id": summary_folder_id,
