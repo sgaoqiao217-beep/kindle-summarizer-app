@@ -530,11 +530,7 @@ def _get_shared_drive_member_sa_credentials():
     if "GOOGLE_CREDENTIALS" not in st.secrets:
         raise KeyError("st.secrets['GOOGLE_CREDENTIALS'] が設定されていません")
     info = _load_secret_dict(st.secrets["GOOGLE_CREDENTIALS"])
-    scopes = [
-        "https://www.googleapis.com/auth/drive",   # SAが自分で作成/共有されたファイルに限定
-        "https://www.googleapis.com/auth/documents",
-    ]
-    return service_account.Credentials.from_service_account_info(info, scopes=scopes)
+    return service_account.Credentials.from_service_account_info(info, scopes=_DELEGATED_SA_SCOPES)
 
 
 def _ensure_drive_docs_creds():
@@ -696,9 +692,9 @@ def _download_drive_images(creds, file_entries: List[Dict[str, str]], dest_dir: 
         saved_paths.append(dest_path)
     return saved_paths
 
-def _log_drive_identity_once(creds):
-    """Drive APIで現在の認証ユーザーを一度だけ表示"""
-    if st.session_state.get("whoami_logged"):
+def _log_drive_identity_once(creds, force: bool = False):
+    """Drive APIで現在の認証ユーザーを表示（force=Trueで毎回表示）"""
+    if st.session_state.get("whoami_logged") and not force:
         return
     try:
         email = _whoami_email(creds)
@@ -999,6 +995,15 @@ if "drive_files" not in st.session_state:
     st.session_state.drive_files = []
 if "needs_chapter_split" not in st.session_state:
     st.session_state.needs_chapter_split = False
+
+with st.sidebar:
+    st.markdown("### 認証ツール")
+    if st.button("現在のGoogle認証を確認", use_container_width=True):
+        try:
+            creds = _get_shared_drive_member_sa_credentials()
+            _log_drive_identity_once(creds, force=True)
+        except Exception as e:
+            st.error(f"認証確認に失敗: {e}")
 
 # Step 1: 画像アップロード
 st.subheader("Step 1. 画像アップロード")
