@@ -956,7 +956,7 @@ st.caption("画像アップロード → 並べ替え → OCR → 章/固定長�
 
 with st.sidebar:
     st.header("設定")
-    st.write("Google Cloud 認証")
+    # st.write("Google Cloud 認証")
     cred_mode = st.radio("認証方法", ["環境変数を使う", "JSONをアップロード"], horizontal=True)
     uploaded_key = None
     if cred_mode == "JSONをアップロード":
