@@ -531,7 +531,7 @@ def _get_shared_drive_member_sa_credentials():
         raise KeyError("st.secrets['GOOGLE_CREDENTIALS'] が設定されていません")
     info = _load_secret_dict(st.secrets["GOOGLE_CREDENTIALS"])
     scopes = [
-        "https://www.googleapis.com/auth/drive.file",   # SAが自分で作成/共有されたファイルに限定
+        "https://www.googleapis.com/auth/drive",   # SAが自分で作成/共有されたファイルに限定
         "https://www.googleapis.com/auth/documents",
     ]
     return service_account.Credentials.from_service_account_info(info, scopes=scopes)
@@ -589,6 +589,8 @@ def _create_doc_in_shared_drive(
         fields="id,name,driveId",
         supportsAllDrives=True,
     ).execute()
+
+    st.info(f"出力先確認: name={parent_meta.get('name')} driveId={parent_meta.get('driveId')}")
 
     if not parent_meta.get("driveId"):
         raise RuntimeError(
