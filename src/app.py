@@ -1005,14 +1005,14 @@ if "drive_files" not in st.session_state:
 if "needs_chapter_split" not in st.session_state:
     st.session_state.needs_chapter_split = False
 
-with st.sidebar:
-    st.markdown("### 認証ツール")
-    if st.button("現在のGoogle認証を確認", use_container_width=True):
-        try:
-            creds = _get_shared_drive_member_sa_credentials()
-            _log_drive_identity_once(creds, force=True)
-        except Exception as e:
-            st.error(f"認証確認に失敗: {e}")
+# with st.sidebar:
+#     st.markdown("### 認証ツール")
+#     if st.button("現在のGoogle認証を確認", use_container_width=True):
+#         try:
+#             creds = _get_shared_drive_member_sa_credentials()
+#             _log_drive_identity_once(creds, force=True)
+#         except Exception as e:
+#             st.error(f"認証確認に失敗: {e}")
 
 # Step 1: 画像アップロード
 st.subheader("Step 1. 画像アップロード")

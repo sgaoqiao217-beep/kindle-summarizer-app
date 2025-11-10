@@ -1,11 +1,19 @@
-# requirements.txt
-streamlit>=1.38
-google-cloud-vision>=3.7
+streamlit>=1.38,<2
 python-dotenv>=1.0
 pillow>=10.4
 regex>=2024.7.24
-google-genai>=0.5.0
 natsort>=8.0
+
+# Google APIs
+google-api-python-client>=2.121.0
 google-auth>=2.34.0
-google-auth-oauthlib>=1.2.1 
-google-api-python-client
+google-auth-oauthlib>=1.2.1
+google-auth-httplib2>=0.2.0
+httplib2>=0.22.0
+
+# Vision
+google-cloud-vision>=3.7,<4
+protobuf<6  # Vision周りの互換性用にピン留め（念のため）
+
+# Gemini
+google-genai>=0.5.0
