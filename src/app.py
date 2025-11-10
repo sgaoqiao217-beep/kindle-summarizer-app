@@ -973,6 +973,15 @@ with st.sidebar:
     st.write("要約の長さ（フォールバック時）")
     max_chars = st.slider("要約上限文字（フォールバック）", 600, 2000, 1200, 100)
     st.session_state.max_chars = max_chars
+    st.divider()
+    st.markdown("### 認証ツール")
+    if st.button("現在のGoogle認証を確認", key="btn_check_auth", use_container_width=True):
+        try:
+            creds = _get_shared_drive_member_sa_credentials()
+            _log_drive_identity_once(creds, force=True)  # 「誰として実行中か」を青い枠で表示
+        except Exception as e:
+            st.error(f"認証確認に失敗: {e}")
+
 
 # セッション状態
 if "workdir" not in st.session_state:
