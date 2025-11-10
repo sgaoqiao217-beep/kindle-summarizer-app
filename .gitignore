@@ -73,3 +73,7 @@ app_serviceAccount.py
 ../.streamlit/secrets.toml
 
 
+
+# secrets (do not commit)
+.streamlit/secrets*.toml
+*.json
