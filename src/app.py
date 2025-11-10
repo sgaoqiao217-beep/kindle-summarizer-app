@@ -561,6 +561,66 @@ def _get_cached_google_credentials():
     return _ensure_drive_docs_creds()
 
 
+def _escape_drive_query_value(value: str) -> str:
+    return (value or "").replace("'", "\\'")
+
+
+def _ensure_child_folder(drive_service, parent_id: str, folder_name: str) -> str:
+    """
+    親フォルダ直下に folder_name のフォルダを保証してIDを返す。
+    共有ドライブでも動作するよう supportsAllDrives を有効にする。
+    """
+    normalized = (folder_name or "").strip() or "Untitled"
+    safe_name = _escape_drive_query_value(normalized)
+    query = (
+        f"name = '{safe_name}' and "
+        "mimeType = 'application/vnd.google-apps.folder' and "
+        "trashed = false and "
+        f"'{parent_id}' in parents"
+    )
+    res = drive_service.files().list(
+        q=query,
+        fields="files(id, name)",
+        pageSize=1,
+        supportsAllDrives=True,
+        includeItemsFromAllDrives=True,
+    ).execute()
+    items = res.get("files", [])
+    if items:
+        return items[0]["id"]
+
+    metadata = {
+        "name": normalized,
+        "mimeType": "application/vnd.google-apps.folder",
+        "parents": [parent_id],
+    }
+    created = drive_service.files().create(
+        body=metadata,
+        fields="id",
+        supportsAllDrives=True,
+    ).execute()
+    return created["id"]
+
+
+def _ensure_export_folder_tree(drive_service, parent_folder_id: str, book_title: str) -> Dict[str, str]:
+    """
+    共有ドライブ/parent_folder_id 配下に
+    kindle-Export/book_title/{book_title (文章全体), book_title (要約)}
+    を作成して各IDを返す。
+    """
+    effective_title = (book_title or "").strip() or "Kindle書籍"
+    kindle_root_id = _ensure_child_folder(drive_service, parent_folder_id, "kindle-Export")
+    book_folder_id = _ensure_child_folder(drive_service, kindle_root_id, effective_title)
+    full_folder_id = _ensure_child_folder(drive_service, book_folder_id, f"{effective_title} (文章全体)")
+    summary_folder_id = _ensure_child_folder(drive_service, book_folder_id, f"{effective_title} (要約)")
+    return {
+        "kindle_root_id": kindle_root_id,
+        "book_folder_id": book_folder_id,
+        "full_folder_id": full_folder_id,
+        "summary_folder_id": summary_folder_id,
+    }
+
+
 def _create_doc_in_shared_drive(
     parent_folder_id: str,
     doc_title: str,
@@ -1260,7 +1320,16 @@ if st.session_state.summaries:
                 drive_service = build("drive", "v3", credentials=creds)
                 docs_service  = build("docs",  "v1", credentials=creds)
 
-                
+                effective_book_title = (book_title_input or "").strip() or "Kindle書籍"
+                folder_info = _ensure_export_folder_tree(
+                    drive_service,
+                    parent_folder_id,
+                    effective_book_title,
+                )
+                full_folder_id = folder_info["full_folder_id"]
+                summary_folder_id = folder_info["summary_folder_id"]
+                book_folder_id = folder_info["book_folder_id"]
+
                 # 章/パート候補（Step4の結果が無ければ全文を1件として扱う）
                 chapters_for_doc = (
                     st.session_state.chapters
@@ -1276,8 +1345,8 @@ if st.session_state.summaries:
 
                     with st.spinner("文章全体のドキュメントを作成中…"):
                         _create_doc_in_shared_drive(
-                            parent_folder_id,
-                            f"{book_title_input}（文章全体）",
+                            full_folder_id,
+                            f"{effective_book_title}（文章全体）",
                             full_content,
                             creds,
                             drive_service=drive_service,
@@ -1285,15 +1354,15 @@ if st.session_state.summaries:
                         )
                     with st.spinner("要約ドキュメントを作成中…"):
                         _create_doc_in_shared_drive(
-                            parent_folder_id,
-                            f"{book_title_input}（要約）",
+                            summary_folder_id,
+                            f"{effective_book_title}（要約）",
                             summary_content,
                             creds,
                             drive_service=drive_service,
                             docs_service=docs_service,
                         )
                     st.success("Googleドキュメントの作成が完了しました。Google Drive をご確認ください。")
-                    st.markdown(f"📂 保存先フォルダ: [{parent_folder_id}]({_folder_url(parent_folder_id)})")
+                    st.markdown(f"📂 保存先フォルダ: [{book_folder_id}]({_folder_url(book_folder_id)})")
 
                 else:
                     # ★ パートごとに分割して書き出し ★
@@ -1305,8 +1374,8 @@ if st.session_state.summaries:
                             doc_name = _make_part_doc_name(idx)  # 例: Part 01.doc
                             content = _build_single_doc_content(title, body)
                             _create_doc_in_shared_drive(
-                                parent_folder_id,
-                                f"{book_title_input}（{doc_name}）",
+                                full_folder_id,
+                                f"{effective_book_title}（{doc_name}）",
                                 content,
                                 creds,
                                 drive_service=drive_service,
@@ -1326,8 +1395,8 @@ if st.session_state.summaries:
                                 # 要約と本文で同名にしたくない場合は下行に変更例：
                                 # doc_name = f"Part {idx:02d}（要約）.doc"
                                 _create_doc_in_shared_drive(
-                                    parent_folder_id,
-                                    f"{book_title_input}（{doc_name}）",
+                                    summary_folder_id,
+                                    f"{effective_book_title}（{doc_name}）",
                                     content,
                                     creds,
                                     drive_service=drive_service,
@@ -1335,7 +1404,7 @@ if st.session_state.summaries:
                                 )
 
                     st.success(f"パート分割の作成が完了しました（{total}件）。Google Drive をご確認ください。")
-                    st.markdown(f"📂 保存先フォルダ: [{parent_folder_id}]({_folder_url(parent_folder_id)})")
+                    st.markdown(f"📂 保存先フォルダ: [{book_folder_id}]({_folder_url(book_folder_id)})")
 
             except Exception as e:
                 st.error(f"Googleドキュメントの作成に失敗しました: {e}")
