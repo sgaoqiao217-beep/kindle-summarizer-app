@@ -767,29 +767,29 @@ def _pick_text(d: Dict[str, Any]) -> str:
 #     return client
 
 def get_vision_client(json_key_path: Optional[str] = None):
-    if json_key_path:
-        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = json_key_path
-
-    # ← 追加（環境変数で quota project が勝手に付くのを防ぐ）
+    # 余計なプロジェクト環境変数が効いていると衝突するので一応クリア
     for k in ("GOOGLE_CLOUD_QUOTA_PROJECT", "GOOGLE_CLOUD_PROJECT", "GCLOUD_PROJECT"):
         os.environ.pop(k, None)
 
     from google.cloud import vision
-    import json
     from google.oauth2 import service_account
+    import json as _json
 
-    raw = st.secrets["GOOGLE_CREDENTIALS"]
-    credentials_info = json.loads(raw) if isinstance(raw, str) else raw
-
-    # スコープを明示して作る（推奨）
     scopes = ["https://www.googleapis.com/auth/cloud-platform"]
-    credentials = service_account.Credentials.from_service_account_info(credentials_info, scopes=scopes)
 
-    # ★ ここで with_quota_project は付けない（今は不要）
-    # credentials = credentials.with_quota_project("sunny-advantage-471612-v1")
+    if json_key_path:
+        # 「JSONをアップロード」選択時はこちらを使用（ファイルパスを直接読む）
+        creds = service_account.Credentials.from_service_account_file(json_key_path, scopes=scopes)
+        return vision.ImageAnnotatorClient(credentials=creds)
 
-    client = vision.ImageAnnotatorClient(credentials=credentials)
-    return client
+    # ここから secrets.toml 経由（JSON本文をそのまま入れる）
+    raw = st.secrets.get("GOOGLE_CREDENTIALS")
+    if not raw:
+        raise KeyError("st.secrets['GOOGLE_CREDENTIALS'] が未設定です。 .streamlit/secrets.toml にサービスアカウントJSON全文を入れてください。")
+
+    info = _json.loads(raw) if isinstance(raw, str) else raw
+    creds = service_account.Credentials.from_service_account_info(info, scopes=scopes)
+    return vision.ImageAnnotatorClient(credentials=creds)
 
 
 def _extract_with_vision(img_path: str, client) -> Dict[str, Any]:
