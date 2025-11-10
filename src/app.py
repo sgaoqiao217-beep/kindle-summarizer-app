@@ -573,15 +573,29 @@ def _create_doc_in_shared_drive(
     drive_service=None,
     docs_service=None,
 ):
-    """共有ドライブ上の指定フォルダID直下にGoogleドキュメントを新規作成して本文を流し込む"""
     if build is None:
-        raise ImportError("googleapiclient がインストールされていません。`pip install google-api-python-client` を実行してください。")
+        raise ImportError("googleapiclient が必要です。")
+
     if not parent_folder_id:
         raise ValueError("parent_folder_id is required")
 
+    # サービス生成（外から渡されたものがあれば再利用）
     drive = drive_service or build("drive", "v3", credentials=creds)
-    docs = docs_service or build("docs", "v1", credentials=creds)
+    docs  = docs_service  or build("docs",  "v1", credentials=creds)
 
+    # ★ ここで“親が共有ドライブ配下か”を確認（driveId が付く）
+    parent_meta = drive.files().get(
+        fileId=parent_folder_id,
+        fields="id,name,driveId",
+        supportsAllDrives=True,
+    ).execute()
+
+    if not parent_meta.get("driveId"):
+        raise RuntimeError(
+            "指定の親IDは共有ドライブ配下ではありません。共有ドライブ内のフォルダIDを指定してください。"
+        )
+
+    # 共有ドライブ配下が確認できたので作成
     file_meta = {
         "name": doc_title,
         "mimeType": "application/vnd.google-apps.document",
@@ -589,27 +603,25 @@ def _create_doc_in_shared_drive(
     }
     created = drive.files().create(
         body=file_meta,
-        fields="id, parents",
+        fields="id,parents",
         supportsAllDrives=True,
     ).execute()
     doc_id = created["id"]
 
     payload = (content or "").rstrip() + "\n"
-    requests = [
-        {"insertText": {"location": {"index": 1}, "text": payload}},
-    ]
+    requests = [{"insertText": {"location": {"index": 1}, "text": payload}}]
+
+    # 1行目を見出し2に
     first_line = payload.splitlines()[0] if payload.strip() else ""
     if first_line:
-        heading_end = len(first_line) + 1  # 行＋末尾の改行
-        requests.append(
-            {
-                "updateParagraphStyle": {
-                    "range": {"startIndex": 1, "endIndex": heading_end},
-                    "paragraphStyle": {"namedStyleType": "HEADING_2"},
-                    "fields": "namedStyleType",
-                }
+        heading_end = len(first_line) + 1
+        requests.append({
+            "updateParagraphStyle": {
+                "range": {"startIndex": 1, "endIndex": heading_end},
+                "paragraphStyle": {"namedStyleType": "HEADING_2"},
+                "fields": "namedStyleType",
             }
-        )
+        })
 
     docs.documents().batchUpdate(documentId=doc_id, body={"requests": requests}).execute()
     return doc_id
