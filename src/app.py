@@ -1215,7 +1215,7 @@ if st.session_state.summaries:
     drive_root_input = st.text_input(
         "共有ドライブの親フォルダURLまたはID",
         value=default_root,
-        placeholder="https://drive.google.com/drive/folders/0AOW24TOGfUF8Uk9PVA",
+        placeholder="https://drive.google.com/drive/u/0/folders/1soiMC-Rl1q6RSr8z4DdsDDk07aq6UNeT",
         help="共有ドライブ内の任意フォルダURLを貼り付けるか、フォルダID文字列を入力してください。",
     )
     st.session_state.book_title_input = book_title_input
