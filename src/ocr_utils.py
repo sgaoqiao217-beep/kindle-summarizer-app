@@ -23,24 +23,34 @@ def _vision_client_from_secrets():
     return vision.ImageAnnotatorClient(credentials=creds)
 
 def _remove_page_header_from_text(text: str, header_text: str) -> str:
-    """ページ最上段（ヘッダ）の文字列をOCR結果から除去する"""
+    """ページ最上段（ヘッダ）の文字列をOCR結果から除去する（汎用版）"""
     if not text or not header_text:
         return text
 
-    # 1) 先頭行にいるケース
-    pattern_start = r"^" + re.escape(header_text) + r"[ \t　]*\n?"
-    new_text, n = re.subn(pattern_start, "", text, count=1)
-    if n > 0:
-        return new_text
+    # ヘッダ側を正規化（全角→半角、スペース削除）
+    norm_header = unicodedata.normalize("NFKC", header_text)
+    norm_header = re.sub(r"\s+", "", norm_header)
+    if not norm_header:
+        return text
 
-    # 2) 途中の行に単独であるケース（\nHEADER\n）
-    pattern_line = r"\n" + re.escape(header_text) + r"[ \t　]*\n"
-    new_text, n = re.subn(pattern_line, "\n", text, count=1)
-    if n > 0:
-        return new_text
+    lines = text.splitlines()
+    new_lines = []
+    removed = False
 
-    # 3) 念のため、最初の1回だけ置き換え
-    return text.replace(header_text, "", 1)
+    for ln in lines:
+        norm_ln = unicodedata.normalize("NFKC", ln)
+        norm_ln = re.sub(r"\s+", "", norm_ln)
+
+        # まだ削除していなくて、「ヘッダ文字列をかなり含んでいる行」はヘッダとみなす
+        if (not removed) and norm_header and (norm_header in norm_ln or norm_ln in norm_header):
+            removed = True
+            continue  # この行は捨てる
+
+        new_lines.append(ln)
+
+    return "\n".join(new_lines)
+
+
 
 
 """画像から Title, Body, Left, Right を抽出して dict で返す"""
