@@ -1189,8 +1189,8 @@ st.caption("画像アップロード → 並べ替え → OCR → 章/固定長�
 with st.sidebar:
     st.header("設定")
     st.markdown("### 要約するAIモデルを選択")
-    model_candidates = ["gemini-2.5-pro", "gemini-1.5-pro", "gemini-2.5-flash"]
-    current_model = st.session_state.get("gemini_model", os.getenv("GEMINI_MODEL") or "gemini-2.5-pro")
+    model_candidates = ["gemini-2.5-pro", "gemini-1.5-pro", "gemini-2.5-flash", "gemini-3-pro-preview"]
+    current_model = st.session_state.get("gemini_model", os.getenv("GEMINI_MODEL"))
     model_index = model_candidates.index(current_model) if current_model in model_candidates else 0
     selected_model = st.selectbox("Gemini モデル", model_candidates, index=model_index)
     st.session_state.gemini_model = selected_model
