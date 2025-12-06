@@ -23,13 +23,28 @@ def _vision_client_from_secrets():
     return vision.ImageAnnotatorClient(credentials=creds)
 
 """画像から Title, Body, Left, Right を抽出して dict で返す"""
-def extract_info_type1(image_path: str):
+def extract_info_type1(image_path: str, writing_direction: str = "vertical"):
+    """
+    画像から Title, Body, Left, Right を抽出して dict で返す。
+    writing_direction: "vertical" / "horizontal"
+    """
 
     client = _vision_client_from_secrets()
     with open(image_path, "rb") as f:
         content = f.read()
     image = vision.Image(content=content)
-    response = client.document_text_detection(image=image)
+
+    # 縦書き/横書きで language_hints を切り替え（おまけ）
+    direction = (writing_direction or "vertical").lower()
+    if direction.startswith("h"):
+        image_context = vision.ImageContext(language_hints=["ja", "en"])
+    else:
+        image_context = vision.ImageContext(language_hints=["ja"])
+
+    response = client.document_text_detection(
+        image=image,
+        image_context=image_context,
+    )
     annotations = response.text_annotations
 
     if not annotations:
@@ -61,25 +76,35 @@ def extract_info_type1(image_path: str):
     page_top = min(b["top"] for b in page_group)
 
     img_width = max(b["right"] for b in boxes)
-    left_page = [b for b in page_group if b["right"] < img_width/3]
-    right_page = [b for b in page_group if b["left"] > img_width*2/3]
+    left_page = [b for b in page_group if b["right"] < img_width / 3]
+    right_page = [b for b in page_group if b["left"] > img_width * 2 / 3]
 
-    # Body
-    body_group = [b for b in boxes if b["top"] > title_bottom and b["bottom"] < page_top]
-    body_sorted = sorted(body_group, key=lambda x: -x["left"])
-    
-    columns = defaultdict(list)
-    for b in body_sorted:
-        col_key = int(b["left"] / 50)
-        columns[col_key].append(b)
+    # ---- Body の作り方を writing_direction で切り替える ----
+    if direction.startswith("h"):
+        # 横書き: Vision が組んだ順序をそのまま使う
+        fta = getattr(response, "full_text_annotation", None)
+        if fta and getattr(fta, "text", None):
+            body_text = fta.text
+        else:
+            # 保険として description にフォールバック
+            body_text = annotations[0].description if annotations else ""
+    else:
+        # 縦書き: これまでどおり、列ごとに右→左で組み立て
+        body_group = [b for b in boxes if b["top"] > title_bottom and b["bottom"] < page_top]
+        body_sorted = sorted(body_group, key=lambda x: -x["left"])
 
-    column_texts = []
-    for col in sorted(columns.keys(), reverse=True):
-        col_boxes = sorted(columns[col], key=lambda b: b["top"])
-        col_text = "".join(b["text"] for b in col_boxes)
-        column_texts.append(col_text)
+        columns = defaultdict(list)
+        for b in body_sorted:
+            col_key = int(b["left"] / 50)
+            columns[col_key].append(b)
 
-    body_text = "\n".join(column_texts)
+        column_texts = []
+        for col in sorted(columns.keys(), reverse=True):
+            col_boxes = sorted(columns[col], key=lambda b: b["top"])
+            col_text = "".join(b["text"] for b in col_boxes)
+            column_texts.append(col_text)
+
+        body_text = "\n".join(column_texts)
 
     info = {
         "Filename": os.path.basename(image_path),
