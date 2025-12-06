@@ -1188,22 +1188,25 @@ st.caption("画像アップロード → 並べ替え → OCR → 章/固定長�
 
 with st.sidebar:
     st.header("設定")
-    cred_mode = st.radio("認証方法", ["環境変数を使う", "JSONをアップロード"], horizontal=True)
-    uploaded_key = None
-    if cred_mode == "JSONをアップロード":
-        key_file = st.file_uploader("サービスアカウントのJSON", type=["json"])
-        if key_file is not None:
-            # 一時ファイルに保存
-            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".json")
-            tmp.write(key_file.read())
-            tmp.flush()
-            uploaded_key = tmp.name
-            st.success("認証情報をメモリに読み込みました。")
+    st.markdown("### 要約するAIモデルを選択")
+    model_candidates = ["gemini-2.5-pro", "gemini-1.5-pro", "gemini-2.5-flash"]
+    current_model = st.session_state.get("gemini_model", os.getenv("GEMINI_MODEL") or "gemini-2.5-pro")
+    model_index = model_candidates.index(current_model) if current_model in model_candidates else 0
+    selected_model = st.selectbox("Gemini モデル", model_candidates, index=model_index)
+    st.session_state.gemini_model = selected_model
+    os.environ["GEMINI_MODEL"] = selected_model
 
-    st.divider()
-    st.write("要約の長さ（フォールバック時）")
-    max_chars = st.slider("要約上限文字（フォールバック）", 600, 2000, 1200, 100)
-    st.session_state.max_chars = max_chars
+    api_key_input = st.text_input(
+        "Gemini APIキー",
+        value=st.session_state.get("gemini_api_key", ""),
+        type="password",
+        placeholder="AIza...",
+        help="ブラウザセッション内にのみ保持します。"
+    )
+    if api_key_input:
+        st.session_state.gemini_api_key = api_key_input.strip()
+        os.environ["GEMINI_API_KEY"] = st.session_state.gemini_api_key
+
     st.divider()
     st.markdown("### 認証ツール")
     if st.button("現在のGoogle認証を確認", key="btn_check_auth", use_container_width=True):
@@ -1217,6 +1220,14 @@ with st.sidebar:
 # セッション状態
 if "workdir" not in st.session_state:
     st.session_state.workdir = tempfile.mkdtemp(prefix="kindle_ocr_")
+if "gemini_api_key" not in st.session_state:
+    st.session_state.gemini_api_key = os.getenv("GEMINI_API_KEY", "")
+if st.session_state.gemini_api_key:
+    os.environ["GEMINI_API_KEY"] = st.session_state.gemini_api_key
+if "gemini_model" not in st.session_state:
+    st.session_state.gemini_model = os.getenv("GEMINI_MODEL") or "gemini-2.5-pro"
+if st.session_state.gemini_model:
+    os.environ["GEMINI_MODEL"] = st.session_state.gemini_model
 if "images" not in st.session_state:
     st.session_state.images = []
 if "ocr_results" not in st.session_state:
@@ -1235,6 +1246,8 @@ if "drive_files" not in st.session_state:
     st.session_state.drive_files = []
 if "needs_chapter_split" not in st.session_state:
     st.session_state.needs_chapter_split = False
+if "max_chars" not in st.session_state:
+    st.session_state.max_chars = 1200
 if "writing_direction" not in st.session_state:
     # デフォルトは縦書き
     st.session_state.writing_direction = "vertical"
