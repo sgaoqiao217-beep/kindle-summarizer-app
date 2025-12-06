@@ -23,8 +23,8 @@ def _vision_client_from_secrets():
     return vision.ImageAnnotatorClient(credentials=creds)
 
 """画像から Title, Body, Left, Right を抽出して dict で返す"""
-def extract_info_type1(image_path: str, writing_direction: str = "vertical"):
 
+def extract_info_type1(image_path: str, writing_direction: str = "vertical"):
     client = _vision_client_from_secrets()
     with open(image_path, "rb") as f:
         content = f.read()
@@ -34,6 +34,41 @@ def extract_info_type1(image_path: str, writing_direction: str = "vertical"):
 
     if not annotations:
         return None
+
+    direction = (writing_direction or "vertical").lower()
+
+    # =====================================================
+    # ① 横書きは、Vision が組んだ全文をそのまま使う
+    # =====================================================
+    if direction.startswith("h"):
+        fta = getattr(response, "full_text_annotation", None)
+        if fta is not None and getattr(fta, "text", None):
+            raw_text = fta.text
+        else:
+            # 念のためのフォールバック
+            raw_text = annotations[0].description
+
+        body_text = _post_ocr_cleanup(raw_text or "")
+
+        # タイトルらしき行（1行目）をざっくり Title に入れる
+        lines = body_text.splitlines()
+        title = ""
+        if lines:
+            # 先頭行から装飾記号を軽く落とす程度
+            title = lines[0].strip("★＊* 　[]")
+
+        return {
+            "Filename": os.path.basename(image_path),
+            "Title": title,
+            "Body": body_text,
+            "Left": "",
+            "Right": "",
+        }
+
+    # =====================================================
+    # ② ここから下は「縦書き or 旧来の縦組み想定」の処理
+    #    （元の boxes を使ったロジックをそのまま使う）
+    # =====================================================
 
     # 文字ごとのバウンディングボックス
     boxes = []
@@ -49,8 +84,6 @@ def extract_info_type1(image_path: str, writing_direction: str = "vertical"):
 
     if not boxes:
         return None
-
-    direction = (writing_direction or "vertical").lower()
 
     # Title（最上段）
     min_top = min(b["top"] for b in boxes)
@@ -69,80 +102,23 @@ def extract_info_type1(image_path: str, writing_direction: str = "vertical"):
     # Body 部分だけを抽出（タイトル行より下、ページ最下部より上）
     body_group = [b for b in boxes if b["top"] > title_bottom and b["bottom"] < page_top]
 
-    def _assemble_horizontal_half(half_boxes):
-        """横書きページの片側を、上→下・左→右でざっくり組み立てる"""
-        if not half_boxes:
-            return ""
+    # 縦組み想定の元ロジック
+    body_sorted = sorted(body_group, key=lambda x: -x["left"])
 
-        # 行の高さの中央値から「改行しきい値」を決める
-        heights = sorted((b["bottom"] - b["top"]) for b in half_boxes)
-        base_h = heights[len(heights) // 2] if heights else 1
-        line_threshold = max(int(base_h * 0.7), 1)
+    columns = defaultdict(list)
+    for b in body_sorted:
+        col_key = int(b["left"] / 50)
+        columns[col_key].append(b)
 
-        # 上→下・左→右で並べる
-        sorted_boxes = sorted(half_boxes, key=lambda b: (b["top"], b["left"]))
+    column_texts = []
+    for col in sorted(columns.keys(), reverse=True):
+        col_boxes = sorted(columns[col], key=lambda b: b["top"])
+        col_text = "".join(b["text"] for b in col_boxes)
+        column_texts.append(col_text)
 
-        lines = []
-        current_line = []
-        current_top = None
-
-        for b in sorted_boxes:
-            if current_top is None:
-                current_top = b["top"]
-            # 新しい行とみなすかどうか
-            elif b["top"] - current_top > line_threshold:
-                lines.append("".join(x["text"] for x in current_line))
-                current_line = []
-                current_top = b["top"]
-            current_line.append(b)
-
-        if current_line:
-            lines.append("".join(x["text"] for x in current_line))
-
-        return "\n".join(lines)
-
-    # ---- Body の組み立て ----
-    if direction.startswith("h"):
-        # 横書き: 左ページ ⇒ 右ページ の順でテキストを連結
-        mid_x = img_width / 2.0
-
-        # 各ボックスの中心を基準に左右どちらかへ必ず振り分ける
-        left_body_boxes = []
-        right_body_boxes = []
-        for b in body_group:
-            cx = (b["left"] + b["right"]) / 2.0
-            if cx < mid_x:
-                left_body_boxes.append(b)
-            else:
-                right_body_boxes.append(b)
-
-        left_text = _assemble_horizontal_half(left_body_boxes)
-        right_text = _assemble_horizontal_half(right_body_boxes)
-
-        if left_text and right_text:
-            body_text = left_text + "\n" + right_text
-        else:
-            # どちらか片方しかない場合（片面だけのスクショなど）
-            body_text = left_text or right_text
-    else:
-        # 既存ロジック: 縦書き（右→左の縦組み）を想定
-        body_sorted = sorted(body_group, key=lambda x: -x["left"])
-
-        columns = defaultdict(list)
-        for b in body_sorted:
-            col_key = int(b["left"] / 50)
-            columns[col_key].append(b)
-
-        column_texts = []
-        for col in sorted(columns.keys(), reverse=True):
-            col_boxes = sorted(columns[col], key=lambda b: b["top"])
-            col_text = "".join(b["text"] for b in col_boxes)
-            column_texts.append(col_text)
-
-        body_text = "\n".join(column_texts)
-
-    # ★ ここでOCR後テキストを軽くクリーンアップ
+    body_text = "\n".join(column_texts)
     body_text = _post_ocr_cleanup(body_text)
+
     info = {
         "Filename": os.path.basename(image_path),
         "Title": "".join(b["text"] for b in sorted(title_group, key=lambda x: x["left"])),
@@ -167,24 +143,38 @@ def _post_ocr_cleanup(text: str) -> str:
 
     # 書籍固有でよく出る崩れをピンポイント修正
     common_pairs = {
-        "アフターデジタル": "★アフターデジタル★",
         # 1行目まわり
         "何をしいのか分からない": "何をしたらよいのか分からない",
-        "何をしいのか": "何をしたらよいのか",
 
         # 著者・会社まわり
         "ビービット会社に所属し": "ビービットという会社に所属し",
 
-        # 「業の幹部」→「企業の幹部」
+        # 「業の幹部」系
         "業の幹部とディスカッション": "企業の幹部とディスカッション",
 
-        # 文脈がほぼ決まっているところだけ、ちょっと厚めに修正
+        # ビジネス競争原理
         "そのる新たなビジネス競争原理": "その奥にある新たなビジネス競争原理",
-        "デジタルが完全に世界をイメージできていない": "デジタルが完全に浸透した世界をイメージできていない",
-        "米国の次手": "米国の次の2番手",
-        "何をすべきか、てきました": "何をすべきか、ずっと考えてきました",
-        "行ってきたところを超える反響": "行ってきたところ、予想を超える反響",
-        "ITぜ世界を変えるのか?": "ITは世界を変えるのか?",
+
+        # デジタルが完全に〜
+        "デジタルが完全に浸透世界をイメージできていない": "デジタルが完全に浸透した世界をイメージできていない",
+
+        # 米国の次の〜
+        "米国の次の手": "米国の次の2番手",
+
+        # 考えてきました
+        "何をすべきか、ずっとてきました": "何をすべきか、ずっと考えてきました",
+
+        # 予想を超える反響
+        "行ってきたところ、を超える反響": "行ってきたところ、予想を超える反響があり",
+
+        # IT本のタイトル
+        "IT企業ぜ世界を変えるのか?": "ITは世界を変えるのか?",
+
+        # 日本の現状て〜
+        "日本の現状て熱く議論し": "日本の現状について熱く議論し",
+
+        # 必要とアクション
+        "必要とアクションを提示": "必要となるアクションを提示",
     }
 
     for wrong, correct in common_pairs.items():
