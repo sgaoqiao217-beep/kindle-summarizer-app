@@ -894,113 +894,149 @@ def _assemble_text_from_annotation(
     img_path: Optional[str] = None,
 ) -> str:
     """
-    Vision の full_text_annotation から、縦書き/横書きに合わせて
-    「人間が読む順番」でテキストを組み立て直す。
+    Vision の full_text_annotation からテキストを取り出す。
+    横書きは full_text_annotation.text をそのまま信頼し、
+    うまく取れなかった場合だけ text_annotations[0].description にフォールバックする。
     """
 
     fta = getattr(resp, "full_text_annotation", None)
     if not fta:
-        # full_text_annotation 自体が無い場合は従来ロジックにフォールバック
+        # full_text_annotation 自体が無い場合は昔ながらの description にフォールバック
         if getattr(resp, "text_annotations", None):
             return resp.text_annotations[0].description or ""
         return ""
-
-    # ページが無ければそのまま
-    pages = getattr(fta, "pages", None) or []
-    if not pages:
-        if getattr(fta, "text", None):
-            return fta.text
-        if getattr(resp, "text_annotations", None):
-            return resp.text_annotations[0].description or ""
-        return ""
-
-    def _join_words(words: list[str]) -> str:
-        """英数字どうしの間だけスペースを足しつつ連結"""
-        buf: list[str] = []
-        prev_ascii = False
-        for w in words:
-            if not w:
-                continue
-            cur_ascii = all(ord(ch) < 128 for ch in w)
-            if buf and prev_ascii and cur_ascii:
-                buf.append(" ")
-            buf.append(w)
-            prev_ascii = cur_ascii
-        return "".join(buf)
-
-    # 段落単位で [cx, cy, text] を集める
-    paras: list[tuple[float, float, str]] = []
-    for page in pages:
-        for block in getattr(page, "blocks", []):
-            for para in getattr(block, "paragraphs", []):
-                box = getattr(para, "bounding_box", None)
-                verts = getattr(box, "vertices", []) if box else []
-                xs = [v.x for v in verts if getattr(v, "x", None) is not None]
-                ys = [v.y for v in verts if getattr(v, "y", None) is not None]
-                if not xs or not ys:
-                    continue
-                cx = sum(xs) / len(xs)
-                cy = sum(ys) / len(ys)
-
-                words = []
-                for word in getattr(para, "words", []):
-                    symbols = getattr(word, "symbols", []) or []
-                    txt = "".join(getattr(s, "text", "") for s in symbols)
-                    if txt:
-                        words.append(txt)
-
-                para_text = _join_words(words).strip()
-                if para_text:
-                    paras.append((cx, cy, para_text))
-
-    # 何も取れなければ従来どおり
-    if not paras:
-        if getattr(fta, "text", None):
-            return fta.text
-        if getattr(resp, "text_annotations", None):
-            return resp.text_annotations[0].description or ""
-        return ""
-
-    # 画像のアスペクト比から「見開きっぽいか」をざっくり判定
-    aspect = None
-    if img_path and os.path.exists(img_path):
-        try:
-            from PIL import Image
-            w, h = Image.open(img_path).size
-            if h > 0:
-                aspect = w / float(h)
-        except Exception:
-            pass
 
     direction = (writing_direction or "vertical").lower()
 
+    # ★ 修正：横書きは Vision が組んだテキストをそのまま使う
     if direction.startswith("h"):
-        # 横書き
-
-        # 見開きっぽい横長なら、左ページ→右ページ の順で並べる
-        if aspect and aspect > 1.3:
-            xs = [cx for cx, _, _ in paras]
-            mid_x = (min(xs) + max(xs)) / 2.0
-            left  = [(cx, cy, t) for cx, cy, t in paras if cx <= mid_x]
-            right = [(cx, cy, t) for cx, cy, t in paras if cx >  mid_x]
-
-            left_sorted  = sorted(left,  key=lambda r: (r[1], r[0]))   # y → x
-            right_sorted = sorted(right, key=lambda r: (r[1], r[0]))
-            ordered = left_sorted + right_sorted
-        else:
-            # 1 ページ想定：単純に y → x
-            ordered = sorted(paras, key=lambda r: (r[1], r[0]))
-
-        lines = [t for _, _, t in ordered]
-        return "\n".join(lines)
-
-    else:
-        # 縦書きは Vision が組んだ順をそのまま使う（今までどおり）
         if getattr(fta, "text", None):
             return fta.text
         if getattr(resp, "text_annotations", None):
             return resp.text_annotations[0].description or ""
         return ""
+
+    # 縦書きも基本はそのまま
+    if getattr(fta, "text", None):
+        return fta.text
+    if getattr(resp, "text_annotations", None):
+        return resp.text_annotations[0].description or ""
+    return ""
+
+
+# def _assemble_text_from_annotation(
+#     resp,
+#     writing_direction: str = "vertical",
+#     img_path: Optional[str] = None,
+# ) -> str:
+#     """
+#     Vision の full_text_annotation から、縦書き/横書きに合わせて
+#     「人間が読む順番」でテキストを組み立て直す。
+#     """
+
+#     fta = getattr(resp, "full_text_annotation", None)
+#     if not fta:
+#         # full_text_annotation 自体が無い場合は従来ロジックにフォールバック
+#         if getattr(resp, "text_annotations", None):
+#             return resp.text_annotations[0].description or ""
+#         return ""
+
+#     # ページが無ければそのまま
+#     pages = getattr(fta, "pages", None) or []
+#     if not pages:
+#         if getattr(fta, "text", None):
+#             return fta.text
+#         if getattr(resp, "text_annotations", None):
+#             return resp.text_annotations[0].description or ""
+#         return ""
+
+#     def _join_words(words: list[str]) -> str:
+#         """英数字どうしの間だけスペースを足しつつ連結"""
+#         buf: list[str] = []
+#         prev_ascii = False
+#         for w in words:
+#             if not w:
+#                 continue
+#             cur_ascii = all(ord(ch) < 128 for ch in w)
+#             if buf and prev_ascii and cur_ascii:
+#                 buf.append(" ")
+#             buf.append(w)
+#             prev_ascii = cur_ascii
+#         return "".join(buf)
+
+#     # 段落単位で [cx, cy, text] を集める
+#     paras: list[tuple[float, float, str]] = []
+#     for page in pages:
+#         for block in getattr(page, "blocks", []):
+#             for para in getattr(block, "paragraphs", []):
+#                 box = getattr(para, "bounding_box", None)
+#                 verts = getattr(box, "vertices", []) if box else []
+#                 xs = [v.x for v in verts if getattr(v, "x", None) is not None]
+#                 ys = [v.y for v in verts if getattr(v, "y", None) is not None]
+#                 if not xs or not ys:
+#                     continue
+#                 cx = sum(xs) / len(xs)
+#                 cy = sum(ys) / len(ys)
+
+#                 words = []
+#                 for word in getattr(para, "words", []):
+#                     symbols = getattr(word, "symbols", []) or []
+#                     txt = "".join(getattr(s, "text", "") for s in symbols)
+#                     if txt:
+#                         words.append(txt)
+
+#                 para_text = _join_words(words).strip()
+#                 if para_text:
+#                     paras.append((cx, cy, para_text))
+
+#     # 何も取れなければ従来どおり
+#     if not paras:
+#         if getattr(fta, "text", None):
+#             return fta.text
+#         if getattr(resp, "text_annotations", None):
+#             return resp.text_annotations[0].description or ""
+#         return ""
+
+#     # 画像のアスペクト比から「見開きっぽいか」をざっくり判定
+#     aspect = None
+#     if img_path and os.path.exists(img_path):
+#         try:
+#             from PIL import Image
+#             w, h = Image.open(img_path).size
+#             if h > 0:
+#                 aspect = w / float(h)
+#         except Exception:
+#             pass
+
+#     direction = (writing_direction or "vertical").lower()
+
+#     if direction.startswith("h"):
+#         # 横書き
+
+#         # 見開きっぽい横長なら、左ページ→右ページ の順で並べる
+#         if aspect and aspect > 1.3:
+#             xs = [cx for cx, _, _ in paras]
+#             mid_x = (min(xs) + max(xs)) / 2.0
+#             left  = [(cx, cy, t) for cx, cy, t in paras if cx <= mid_x]
+#             right = [(cx, cy, t) for cx, cy, t in paras if cx >  mid_x]
+
+#             left_sorted  = sorted(left,  key=lambda r: (r[1], r[0]))   # y → x
+#             right_sorted = sorted(right, key=lambda r: (r[1], r[0]))
+#             ordered = left_sorted + right_sorted
+#         else:
+#             # 1 ページ想定：単純に y → x
+#             ordered = sorted(paras, key=lambda r: (r[1], r[0]))
+
+#         lines = [t for _, _, t in ordered]
+#         return "\n".join(lines)
+
+#     else:
+#         # 縦書きは Vision が組んだ順をそのまま使う（今までどおり）
+#         if getattr(fta, "text", None):
+#             return fta.text
+#         if getattr(resp, "text_annotations", None):
+#             return resp.text_annotations[0].description or ""
+#         return ""
 
 
 def fix_broken_chapter_tokens(text: str) -> str:
