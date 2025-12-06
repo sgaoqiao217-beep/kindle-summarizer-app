@@ -1128,12 +1128,15 @@ with st.expander("Googleドライブから取得", expanded=False):
                     st.error(f"フォルダの読み込みまたはダウンロードに失敗しました: {e}")
 
 # Step 1.5: 書籍レイアウト（縦書き/横書き）の選択
+st.subheader("この書籍のレイアウトを選んでください")  # ← 見出しをここで大きく表示
+
 writing_direction = st.radio(
-    "この書籍のレイアウトを選んでください",
+    "",  # ← ラベルは空にすることで二重表示を避ける
     ["縦書き（日本語の本など）", "横書き（技術書・英語本など）"],
     index=0 if st.session_state.get("writing_direction", "vertical") == "vertical" else 1,
     horizontal=True,
 )
+
 st.session_state["writing_direction"] = (
     "vertical" if "縦書き" in writing_direction else "horizontal"
 )
