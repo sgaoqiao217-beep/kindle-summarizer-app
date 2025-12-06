@@ -38,24 +38,44 @@ def extract_info_type1(image_path: str, writing_direction: str = "vertical"):
     direction = (writing_direction or "vertical").lower()
 
     # =====================================================
-    # ① 横書きは、Vision が組んだ全文をそのまま使う
+    # ① 横書きは、Vision が組んだ全文テキストをベースに
+    #    → 上部ヘッダを落とし、【〜】行を Title として切り出す
     # =====================================================
     if direction.startswith("h"):
         fta = getattr(response, "full_text_annotation", None)
         if fta is not None and getattr(fta, "text", None):
             raw_text = fta.text
         else:
-            # 念のためのフォールバック
             raw_text = annotations[0].description
 
         body_text = _post_ocr_cleanup(raw_text or "")
 
-        # タイトルらしき行（1行目）をざっくり Title に入れる
-        lines = body_text.splitlines()
+        # 行単位に分割（空行は一旦落とす）
+        lines = [ln for ln in body_text.splitlines() if ln.strip()]
+
+        # ---- 1) ページ上部の共通ヘッダを削る ----------------
+        #   先頭行に「アフターデジタル」みたいな本タイトルが来ていて、
+        #   2行目以降に【まえがき】などの章タイトルが来るパターンを想定
+        if len(lines) >= 2 and "【" in lines[1] and "】" in lines[1]:
+            # 1行目はヘッダとみなして捨てる
+            lines = lines[1:]
+
+        # ---- 2) 【〜】形式の行を Title として採用 ------------
         title = ""
-        if lines:
-            # 先頭行から装飾記号を軽く落とす程度
-            title = lines[0].strip("★＊* 　[]")
+        start_idx = 0
+        for i, ln in enumerate(lines):
+            if re.match(r"^[\[\(（【].*?[】）\]]$", ln.strip()):
+                title = ln.strip()
+                start_idx = i
+                break
+
+        # 見つからなければ先頭行をタイトル扱い
+        if not title and lines:
+            title = lines[0].strip()
+            start_idx = 0
+
+        # Body はタイトル行以降を連結
+        body_text = "\n".join(lines[start_idx:])
 
         return {
             "Filename": os.path.basename(image_path),
@@ -66,8 +86,7 @@ def extract_info_type1(image_path: str, writing_direction: str = "vertical"):
         }
 
     # =====================================================
-    # ② ここから下は「縦書き or 旧来の縦組み想定」の処理
-    #    （元の boxes を使ったロジックをそのまま使う）
+    # ② ここから下は縦書き（既存ロジック）
     # =====================================================
 
     # 文字ごとのバウンディングボックス
@@ -130,50 +149,25 @@ def extract_info_type1(image_path: str, writing_direction: str = "vertical"):
     return info
 
 def _post_ocr_cleanup(text: str) -> str:
-    """OCR後の本文を軽く整形する（この本向けの簡易辞書つき）"""
     if not text:
         return text
 
-    # 全角・半角の揺れをならす
     t = unicodedata.normalize("NFKC", text)
-
-    # 行内の余計なスペースを削る
-    t = re.sub(r"[ \t]+", " ", t)
+    # t = re.sub(r"[ \t]+", " ", t)
     t = re.sub(r"([、。])\s+", r"\1", t)
 
-    # 書籍固有でよく出る崩れをピンポイント修正
     common_pairs = {
-        # 1行目まわり
         "何をしいのか分からない": "何をしたらよいのか分からない",
-
-        # 著者・会社まわり
         "ビービット会社に所属し": "ビービットという会社に所属し",
-
-        # 「業の幹部」系
         "業の幹部とディスカッション": "企業の幹部とディスカッション",
-
-        # ビジネス競争原理
+        "中国企企業": "中国企業",
         "そのる新たなビジネス競争原理": "その奥にある新たなビジネス競争原理",
-
-        # デジタルが完全に〜
         "デジタルが完全に浸透世界をイメージできていない": "デジタルが完全に浸透した世界をイメージできていない",
-
-        # 米国の次の〜
         "米国の次の手": "米国の次の2番手",
-
-        # 考えてきました
         "何をすべきか、ずっとてきました": "何をすべきか、ずっと考えてきました",
-
-        # 予想を超える反響
         "行ってきたところ、を超える反響": "行ってきたところ、予想を超える反響があり",
-
-        # IT本のタイトル
         "IT企業ぜ世界を変えるのか?": "ITは世界を変えるのか?",
-
-        # 日本の現状て〜
         "日本の現状て熱く議論し": "日本の現状について熱く議論し",
-
-        # 必要とアクション
         "必要とアクションを提示": "必要となるアクションを提示",
     }
 
