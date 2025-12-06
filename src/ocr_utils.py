@@ -106,8 +106,15 @@ def extract_info_type1(image_path: str, writing_direction: str = "vertical"):
         # 横書き: 左ページ ⇒ 右ページ の順でテキストを連結
         mid_x = img_width / 2.0
 
-        left_body_boxes = [b for b in body_group if b["right"] <= mid_x]
-        right_body_boxes = [b for b in body_group if b["left"] > mid_x]
+        # 各ボックスの中心を基準に左右どちらかへ必ず振り分ける
+        left_body_boxes = []
+        right_body_boxes = []
+        for b in body_group:
+            cx = (b["left"] + b["right"]) / 2.0
+            if cx < mid_x:
+                left_body_boxes.append(b)
+            else:
+                right_body_boxes.append(b)
 
         left_text = _assemble_horizontal_half(left_body_boxes)
         right_text = _assemble_horizontal_half(right_body_boxes)
