@@ -134,6 +134,8 @@ def extract_info_type1(image_path: str, writing_direction: str = "vertical"):
 
         body_text = "\n".join(column_texts)
 
+    # ★ ここでOCR後テキストを軽くクリーンアップ
+    body_text = _post_ocr_cleanup(body_text)
     info = {
         "Filename": os.path.basename(image_path),
         "Title": "".join(b["text"] for b in sorted(title_group, key=lambda x: x["left"])),
@@ -143,6 +145,33 @@ def extract_info_type1(image_path: str, writing_direction: str = "vertical"):
     }
 
     return info
+
+def _post_ocr_cleanup(text: str) -> str:
+    if not text:
+        return text
+
+    # 全角・半角の揺れを少しならす
+    t = unicodedata.normalize("NFKC", text)
+
+    # 行頭前後の余計な空白を削る
+    t = re.sub(r"[ \t]+", " ", t)
+
+    # 「、。」の直後の半端な空白を削除
+    t = re.sub(r"([、。])\s+", r"\1", t)
+
+    # よく出るOCR崩れを置換（書籍ごとに増やしていく運用）
+    common_pairs = {
+        "デジタルトランスフォーメーション」 を": "デジタルトランスフォーメーション」を",
+        "何をしいのか": "何をしたらよいのか",
+        "ビービット会社": "ビービットという会社",
+        "米国の次手": "米国の次の2番手",
+        # ↑ 気になるものを見つけたらここへ足していく
+    }
+    for wrong, correct in common_pairs.items():
+        t = t.replace(wrong, correct)
+
+    return t
+
 
 def save_merged_chapter(title, chapter, text_lines, filename_list, output_dir):
     """章データを JSON ファイルに保存（複数ファイル合併版）"""
