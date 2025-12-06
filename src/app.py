@@ -156,7 +156,7 @@ except Exception:
 
 try:
     from ocr_utils import extract_info_type1 as extract_info_external
-    from ocr_utils import _vision_client_from_secrets 
+    from ocr_utils import _vision_client_from_secrets  # noqa: F401
     # ↑ ユーザ環境の関数名に合わせてお好みで
 except Exception:
     extract_info_external = None
@@ -172,7 +172,7 @@ _JP_SENT_END = "。．！？!?" + "」』）】］》〉"
 _JP_SENT_BEGIN = "「『（【［《〈"
 
 # =========================================================
-# ★ 追加：要約前クリーニング（見出し修正・レンジ行削除・文中改行の解消）
+# ★ 要約前クリーニング（見出し修正・レンジ行削除・文中改行の解消）
 # =========================================================
 def clean_presummary_text(text: str) -> str:
     """
@@ -252,6 +252,17 @@ def clean_presummary_text(text: str) -> str:
 
     joined = [join_soft_wraps(p) for p in paragraphs if p.strip()]
     return "\n\n".join(joined)
+
+def clean_presummary_text_by_direction(text: str, writing_direction: str) -> str:
+    """
+    縦書き/横書きの違いによって前処理の方針を切り替えるフック。
+    現時点では縦書き・横書きともに共通のクリーニングを行うが、
+    将来的にロジックを分けたい場合はここを編集する。
+    """
+    # writing_direction: "vertical" / "horizontal" を想定
+    direction = (writing_direction or "vertical").lower()
+    # 将来的に if direction.startswith("h"): で横書き専用ロジックを分けてもよい
+    return clean_presummary_text(text)
 
 format_prompt = """
 You are given raw text from a Japanese book (a novel or story).
@@ -821,33 +832,20 @@ def _pick_text(d: Dict[str, Any]) -> str:
 # OCR
 # =========================
 @st.cache_resource(show_spinner=False)
-# def get_vision_client(json_key_path: Optional[str] = None):
-#     # json_key_pathが指定されていれば一時的に環境変数を差し替え（セッション存続中のみ）
-#     if json_key_path:
-#         os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = json_key_path
-#     from google.cloud import vision
-#     credentials_info = json.loads(st.secrets["GOOGLE_CREDENTIALS"])
-#     st.write(credentials_info)
-#     credentials = service_account.Credentials.from_service_account_info(credentials_info)
-#     client = vision.ImageAnnotatorClient(credentials=credentials)
-#     # client = _vision_client_from_secrets(credentials=credentials)
-    
-#     return client
-
 def get_vision_client(json_key_path: Optional[str] = None):
     # 余計なプロジェクト環境変数が効いていると衝突するので一応クリア
     for k in ("GOOGLE_CLOUD_QUOTA_PROJECT", "GOOGLE_CLOUD_PROJECT", "GCLOUD_PROJECT"):
         os.environ.pop(k, None)
 
     from google.cloud import vision
-    from google.oauth2 import service_account
+    from google.oauth2 import service_account as _sa
     import json as _json
 
     scopes = ["https://www.googleapis.com/auth/cloud-platform"]
 
     if json_key_path:
         # 「JSONをアップロード」選択時はこちらを使用（ファイルパスを直接読む）
-        creds = service_account.Credentials.from_service_account_file(json_key_path, scopes=scopes)
+        creds = _sa.Credentials.from_service_account_file(json_key_path, scopes=scopes)
         return vision.ImageAnnotatorClient(credentials=creds)
 
     # ここから secrets.toml 経由（JSON本文をそのまま入れる）
@@ -856,17 +854,21 @@ def get_vision_client(json_key_path: Optional[str] = None):
         raise KeyError("st.secrets['GOOGLE_CREDENTIALS'] が未設定です。 .streamlit/secrets.toml にサービスアカウントJSON全文を入れてください。")
 
     info = _json.loads(raw) if isinstance(raw, str) else raw
-    creds = service_account.Credentials.from_service_account_info(info, scopes=scopes)
+    creds = _sa.Credentials.from_service_account_info(info, scopes=scopes)
     return vision.ImageAnnotatorClient(credentials=creds)
 
 
-def _extract_with_vision(img_path: str, client) -> Dict[str, Any]:
+def _extract_with_vision(img_path: str, client, writing_direction: str = "vertical"):
     from google.cloud import vision
     with open(img_path, "rb") as f:
         content = f.read()
     image = vision.Image(content=content)
-    # 和書の縦書きを含む日本語ヒント
-    context = vision.ImageContext(language_hints=["ja"])
+    # 和書の縦書きを含む日本語ヒント（横書きの場合は英語も少し優先させるなどのチューニング余地）
+    direction = (writing_direction or "vertical").lower()
+    if direction.startswith("h"):
+        context = vision.ImageContext(language_hints=["ja", "en"])
+    else:
+        context = vision.ImageContext(language_hints=["ja"])
     resp = client.document_text_detection(image=image, image_context=context)
     if resp.error.message:
         raise RuntimeError(resp.error.message)
@@ -962,13 +964,19 @@ def simple_info_extractor(full_text: str) -> Dict[str, Optional[str]]:
 
     return {"Title": None, "Subtitle": None, "Right": right, "Left": left}
 
-def ocr_one_image(img_path: str, client) -> Dict[str, Any]:
+def ocr_one_image(img_path: str, client, writing_direction: str = "vertical") -> Dict[str, Any]:
     """
     1画像のOCR→info抽出→本文返却
+    writing_direction: "vertical" / "horizontal"
     """
     if extract_info_external:
         # 外部実装の戻りが Body/Text など様々でも Text を必ず埋める
-        res = extract_info_external(img_path)
+        try:
+            # writing_direction を受け取る実装があれば渡す
+            res = extract_info_external(img_path, writing_direction=writing_direction)
+        except TypeError:
+            # 旧実装（引数が1つのみ）の場合はこちら
+            res = extract_info_external(img_path)
         res = dict(res) if isinstance(res, dict) else {}
         text = _pick_text(res)
         res.setdefault("Filename", os.path.basename(img_path))
@@ -976,7 +984,7 @@ def ocr_one_image(img_path: str, client) -> Dict[str, Any]:
         return res
 
     # 無い場合は汎用フォールバック
-    resp = _extract_with_vision(img_path, client)
+    resp = _extract_with_vision(img_path, client, writing_direction=writing_direction)
     full_text = ""
     if getattr(resp, "full_text_annotation", None) and resp.full_text_annotation.text:
         full_text = resp.full_text_annotation.text
@@ -1014,7 +1022,6 @@ st.caption("画像アップロード → 並べ替え → OCR → 章/固定長�
 
 with st.sidebar:
     st.header("設定")
-    # st.write("Google Cloud 認証")
     cred_mode = st.radio("認証方法", ["環境変数を使う", "JSONをアップロード"], horizontal=True)
     uploaded_key = None
     if cred_mode == "JSONをアップロード":
@@ -1062,15 +1069,9 @@ if "drive_files" not in st.session_state:
     st.session_state.drive_files = []
 if "needs_chapter_split" not in st.session_state:
     st.session_state.needs_chapter_split = False
-
-# with st.sidebar:
-#     st.markdown("### 認証ツール")
-#     if st.button("現在のGoogle認証を確認", use_container_width=True):
-#         try:
-#             creds = _get_shared_drive_member_sa_credentials()
-#             _log_drive_identity_once(creds, force=True)
-#         except Exception as e:
-#             st.error(f"認証確認に失敗: {e}")
+if "writing_direction" not in st.session_state:
+    # デフォルトは縦書き
+    st.session_state.writing_direction = "vertical"
 
 # Step 1: 画像アップロード
 st.subheader("Step 1. 画像アップロード")
@@ -1122,8 +1123,20 @@ with st.expander("Googleドライブから取得", expanded=False):
                                 st.session_state.images.extend(new_paths)
                                 st.session_state.drive_loaded_folder_id = folder_id
                                 st.success(f"{len(new_paths)} 件の画像を追加しました。Step 2 で並び替えを実行してください。")
+
                 except Exception as e:
                     st.error(f"フォルダの読み込みまたはダウンロードに失敗しました: {e}")
+
+# Step 1.5: 書籍レイアウト（縦書き/横書き）の選択
+writing_direction = st.radio(
+    "この書籍のレイアウトを選んでください",
+    ["縦書き（日本語の本など）", "横書き（技術書・英語本など）"],
+    index=0 if st.session_state.get("writing_direction", "vertical") == "vertical" else 1,
+    horizontal=True,
+)
+st.session_state["writing_direction"] = (
+    "vertical" if "縦書き" in writing_direction else "horizontal"
+)
 
 # Step 2: 並び替え（ファイル名/時刻ベース）
 st.subheader("Step 2. ページ順に並び替え")
@@ -1136,7 +1149,6 @@ if st.session_state.images:
             st.session_state.images = [os.path.join(st.session_state.workdir, f) for f in os.listdir(st.session_state.workdir)]
         st.session_state.images = normalize_filenames_local(st.session_state.images)
         st.success("並び替え完了")
-    # st.caption("※ プロジェクトの命名規則が厳密に決まっている場合は、`normalize_filenames` の実装を調整してください。")
 
 # Step 3: OCR & info抽出
 st.subheader("Step 3. OCR & info抽出")
@@ -1145,9 +1157,10 @@ if st.session_state.images:
     if st.button("OCRを実行", type="primary", use_container_width=True):
         results = []
         prog = st.progress(0.0, text="OCR処理中…")
+        direction = st.session_state.get("writing_direction", "vertical")
         for i, p in enumerate(st.session_state.images):
             try:
-                info = ocr_one_image(p, client)
+                info = ocr_one_image(p, client, writing_direction=direction)
                 info["Path"] = p
                 results.append(info)
             except Exception as e:
@@ -1163,8 +1176,8 @@ if st.session_state.images:
                 texts.append(t)
         combined_text = "\n\n".join(texts).strip()
 
-        # ★ ここでクリーニングを適用（見出し修正/レンジ行削除/文中改行解消）
-        cleaned_text = clean_presummary_text(combined_text)
+        # ★ ここでクリーニングを適用（縦書き/横書きに応じた前処理フック）
+        cleaned_text = clean_presummary_text_by_direction(combined_text, direction)
 
         st.session_state.full_text = cleaned_text
         st.session_state.needs_chapter_split = bool(st.session_state.full_text)
@@ -1173,7 +1186,6 @@ if st.session_state.images:
 
 if st.session_state.ocr_results:
     with st.expander("抽出結果（最初の数件）", expanded=False):
-        # 中身を目視確認しやすいよう snippet を表示
         preview = []
         for r in st.session_state.ocr_results[:3]:
             preview.append({
@@ -1189,17 +1201,15 @@ st.subheader("Step 4. 文字数で分割（10,000字ごと）")
 if st.session_state.ocr_results and not (st.session_state.full_text or "").strip():
     reconstructed = "\n\n".join([_pick_text(r) for r in st.session_state.ocr_results if _pick_text(r)]).strip()
     if reconstructed:
-        # ★ 復元時にもクリーニング適用
-        reconstructed = clean_presummary_text(reconstructed)
+        # ★ 復元時にもクリーニング適用（縦書き/横書きに応じて）
+        direction = st.session_state.get("writing_direction", "vertical")
+        reconstructed = clean_presummary_text_by_direction(reconstructed, direction)
         st.session_state.full_text = reconstructed
         if not st.session_state.chapters:
-            st.session_state.needs_chapter_split = True  # 変数名は互換利用
+            st.session_state.needs_chapter_split = True
 
 full_text_value = (st.session_state.get("full_text") or "").strip()
-# 分割は本文があるときのみ有効（空分割を防止）
 can_split = bool(full_text_value)
-
-# st.caption(f"full_text length = {len(full_text_value)}")  # ←デバッグ用に必要であればコメント解除
 
 col_step4_run, col_step4_clear = st.columns([2, 1])
 with col_step4_run:
@@ -1219,10 +1229,9 @@ with col_step4_clear:
 
 if run_split_clicked:
     try:
-        # 章トークン修復は不要だが、OCRのノイズ整形として残しても害はない
         fixed = fix_broken_chapter_tokens(st.session_state.full_text)
         parts = split_by_fixed_chars(fixed, size=10000)
-        st.session_state.chapters = parts            # 下流互換のため同じキーに入れる
+        st.session_state.chapters = parts
         st.session_state.needs_chapter_split = False
         st.success(f"生成チャンク数: {len(parts)}")
     except Exception as e:
@@ -1259,13 +1268,11 @@ elif not can_split:
 # Step 5: 要約
 st.subheader("Step 5. 要約生成")
 if st.session_state.chapters:
-    # まとめて要約
     if st.button("全章を要約する", type="primary", use_container_width=True):
         st.session_state.summaries = {}
         for idx, (title, body) in enumerate(st.session_state.chapters, start=1):
             with st.spinner(f"{idx}/{len(st.session_state.chapters)} 要約中: {title}"):
                 summary = best_effort_summarize(title, body)
-                # フォールバック長制御
                 if not _is_llm_available():
                     summary = summary[:st.session_state.get("max_chars", 1200)]
                 st.session_state.summaries[title] = summary
@@ -1274,7 +1281,6 @@ if st.session_state.chapters:
     if st.session_state.summaries:
         with st.expander("要約結果（上位3章）", expanded=True):
             for i, (title, summ) in enumerate(list(st.session_state.summaries.items())[:3], start=1):
-                #st.markdown(f"## {title}")
                 st.write(summ)
 
 # Step 6: エクスポート
@@ -1298,7 +1304,7 @@ if st.session_state.summaries:
         "Googleドキュメントの作り方",
         ["1本にまとめる（従来）", "パートごとに分割する（Part 01.doc / Part 02.doc ...）"],
         horizontal=False,
-        index=1,  # 既定で「分割」
+        index=1,
     )
     split_summaries = st.checkbox("要約もパートごとに個別ドキュメントで出力する", value=True)
 
@@ -1311,9 +1317,8 @@ if st.session_state.summaries:
                 st.error("共有ドライブのフォルダURLまたはIDを入力してください。")
                 st.stop()
             try:
-                # SA（共有ドライブメンバー）で実行
                 creds = _get_shared_drive_member_sa_credentials()
-                _log_drive_identity_once(creds)  # 実行主体メールを表示したいなら残す
+                _log_drive_identity_once(creds)
 
                 drive_service = build("drive", "v3", credentials=creds)
                 docs_service  = build("docs",  "v1", credentials=creds)
@@ -1328,7 +1333,6 @@ if st.session_state.summaries:
                 summary_folder_id = folder_info["summary_folder_id"]
                 book_folder_id = folder_info["book_folder_id"]
 
-                # 章/パート候補（Step4の結果が無ければ全文を1件として扱う）
                 chapters_for_doc = (
                     st.session_state.chapters
                     if st.session_state.chapters
@@ -1336,7 +1340,6 @@ if st.session_state.summaries:
                 )
 
                 if export_mode.startswith("1本にまとめる"):
-                    # 従来のまとめ書き出し
                     full_content = _build_google_doc_content(chapters_for_doc)
                     summary_sections = list(st.session_state.summaries.items())
                     summary_content = _build_google_doc_content(summary_sections)
@@ -1363,13 +1366,11 @@ if st.session_state.summaries:
                     st.markdown(f"📂 保存先フォルダ: [{book_folder_id}]({_folder_url(book_folder_id)})")
 
                 else:
-                    # ★ パートごとに分割して書き出し ★
                     total = len(chapters_for_doc)
 
-                    # 本文の分割出力
                     with st.spinner("パートごとの本文ドキュメントを作成中…"):
                         for idx, (title, body) in enumerate(chapters_for_doc, start=1):
-                            doc_name = _make_part_doc_name(idx)  # 例: Part 01.doc
+                            doc_name = _make_part_doc_name(idx)
                             content = _build_single_doc_content(title, body)
                             _create_doc_in_shared_drive(
                                 full_folder_id,
@@ -1380,18 +1381,14 @@ if st.session_state.summaries:
                                 docs_service=docs_service,
                             )
 
-                    # 要約の分割出力（任意）
                     if split_summaries and st.session_state.summaries:
                         with st.spinner("パートごとの要約ドキュメントを作成中…"):
                             for idx, (title, _) in enumerate(chapters_for_doc, start=1):
                                 summary_text = st.session_state.summaries.get(title)
                                 if not summary_text:
-                                    continue  # そのタイトルの要約が無い場合はスキップ
-                                # 要約は見出し重複を避けつつ、タイトル行は本文化しておく
+                                    continue
                                 content = _build_single_doc_content(title, summary_text)
-                                doc_name = _make_part_summary_doc_name(idx)  # 例: Part 01.doc
-                                # 要約と本文で同名にしたくない場合は下行に変更例：
-                                # doc_name = f"Part {idx:02d}（要約）.doc"
+                                doc_name = _make_part_summary_doc_name(idx)
                                 _create_doc_in_shared_drive(
                                     summary_folder_id,
                                     f"{effective_book_title}（{doc_name}）",
