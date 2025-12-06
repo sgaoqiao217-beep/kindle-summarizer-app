@@ -24,27 +24,12 @@ def _vision_client_from_secrets():
 
 """画像から Title, Body, Left, Right を抽出して dict で返す"""
 def extract_info_type1(image_path: str, writing_direction: str = "vertical"):
-    """
-    画像から Title, Body, Left, Right を抽出して dict で返す。
-    writing_direction: "vertical" / "horizontal"
-    """
 
     client = _vision_client_from_secrets()
     with open(image_path, "rb") as f:
         content = f.read()
     image = vision.Image(content=content)
-
-    # 縦書き/横書きで language_hints を切り替え（おまけ）
-    direction = (writing_direction or "vertical").lower()
-    if direction.startswith("h"):
-        image_context = vision.ImageContext(language_hints=["ja", "en"])
-    else:
-        image_context = vision.ImageContext(language_hints=["ja"])
-
-    response = client.document_text_detection(
-        image=image,
-        image_context=image_context,
-    )
+    response = client.document_text_detection(image=image)
     annotations = response.text_annotations
 
     if not annotations:
@@ -65,6 +50,8 @@ def extract_info_type1(image_path: str, writing_direction: str = "vertical"):
     if not boxes:
         return None
 
+    direction = (writing_direction or "vertical").lower()
+
     # Title（最上段）
     min_top = min(b["top"] for b in boxes)
     title_group = [b for b in boxes if abs(b["top"] - min_top) < 20]
@@ -79,18 +66,59 @@ def extract_info_type1(image_path: str, writing_direction: str = "vertical"):
     left_page = [b for b in page_group if b["right"] < img_width / 3]
     right_page = [b for b in page_group if b["left"] > img_width * 2 / 3]
 
-    # ---- Body の作り方を writing_direction で切り替える ----
+    # Body 部分だけを抽出（タイトル行より下、ページ最下部より上）
+    body_group = [b for b in boxes if b["top"] > title_bottom and b["bottom"] < page_top]
+
+    def _assemble_horizontal_half(half_boxes):
+        """横書きページの片側を、上→下・左→右でざっくり組み立てる"""
+        if not half_boxes:
+            return ""
+
+        # 行の高さの中央値から「改行しきい値」を決める
+        heights = sorted((b["bottom"] - b["top"]) for b in half_boxes)
+        base_h = heights[len(heights) // 2] if heights else 1
+        line_threshold = max(int(base_h * 0.7), 1)
+
+        # 上→下・左→右で並べる
+        sorted_boxes = sorted(half_boxes, key=lambda b: (b["top"], b["left"]))
+
+        lines = []
+        current_line = []
+        current_top = None
+
+        for b in sorted_boxes:
+            if current_top is None:
+                current_top = b["top"]
+            # 新しい行とみなすかどうか
+            elif b["top"] - current_top > line_threshold:
+                lines.append("".join(x["text"] for x in current_line))
+                current_line = []
+                current_top = b["top"]
+            current_line.append(b)
+
+        if current_line:
+            lines.append("".join(x["text"] for x in current_line))
+
+        return "\n".join(lines)
+
+    # ---- Body の組み立て ----
     if direction.startswith("h"):
-        # 横書き: Vision が組んだ順序をそのまま使う
-        fta = getattr(response, "full_text_annotation", None)
-        if fta and getattr(fta, "text", None):
-            body_text = fta.text
+        # 横書き: 左ページ ⇒ 右ページ の順でテキストを連結
+        mid_x = img_width / 2.0
+
+        left_body_boxes = [b for b in body_group if b["right"] <= mid_x]
+        right_body_boxes = [b for b in body_group if b["left"] > mid_x]
+
+        left_text = _assemble_horizontal_half(left_body_boxes)
+        right_text = _assemble_horizontal_half(right_body_boxes)
+
+        if left_text and right_text:
+            body_text = left_text + "\n" + right_text
         else:
-            # 保険として description にフォールバック
-            body_text = annotations[0].description if annotations else ""
+            # どちらか片方しかない場合（片面だけのスクショなど）
+            body_text = left_text or right_text
     else:
-        # 縦書き: これまでどおり、列ごとに右→左で組み立て
-        body_group = [b for b in boxes if b["top"] > title_bottom and b["bottom"] < page_top]
+        # 既存ロジック: 縦書き（右→左の縦組み）を想定
         body_sorted = sorted(body_group, key=lambda x: -x["left"])
 
         columns = defaultdict(list)
