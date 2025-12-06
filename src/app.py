@@ -1143,7 +1143,7 @@ st.subheader("この書籍のレイアウトを選んでください")  # ← �
 
 writing_direction = st.radio(
     "",  # ← ラベルは空にすることで二重表示を避ける
-    ["縦書き（日本語の本など）", "横書き（技術書・英語本など）"],
+    ["縦書き", "横書き"],
     index=0 if st.session_state.get("writing_direction", "vertical") == "vertical" else 1,
     horizontal=True,
 )
