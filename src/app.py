@@ -1196,17 +1196,6 @@ with st.sidebar:
     st.session_state.gemini_model = selected_model
     os.environ["GEMINI_MODEL"] = selected_model
 
-    api_key_input = st.text_input(
-        "Gemini APIキー",
-        value=st.session_state.get("gemini_api_key", ""),
-        type="password",
-        placeholder="AIza...",
-        help="ブラウザセッション内にのみ保持します。"
-    )
-    if api_key_input:
-        st.session_state.gemini_api_key = api_key_input.strip()
-        os.environ["GEMINI_API_KEY"] = st.session_state.gemini_api_key
-
     st.divider()
     st.markdown("### 認証ツール")
     if st.button("現在のGoogle認証を確認", key="btn_check_auth", use_container_width=True):
@@ -1220,14 +1209,15 @@ with st.sidebar:
 # セッション状態
 if "workdir" not in st.session_state:
     st.session_state.workdir = tempfile.mkdtemp(prefix="kindle_ocr_")
-if "gemini_api_key" not in st.session_state:
-    st.session_state.gemini_api_key = os.getenv("GEMINI_API_KEY", "")
-if st.session_state.gemini_api_key:
-    os.environ["GEMINI_API_KEY"] = st.session_state.gemini_api_key
 if "gemini_model" not in st.session_state:
     st.session_state.gemini_model = os.getenv("GEMINI_MODEL") or "gemini-2.5-pro"
 if st.session_state.gemini_model:
     os.environ["GEMINI_MODEL"] = st.session_state.gemini_model
+if not os.getenv("GEMINI_API_KEY"):
+    # Streamlit の secrets から補完（環境変数優先）
+    api_key_from_secrets = st.secrets.get("GEMINI_API_KEY")
+    if api_key_from_secrets:
+        os.environ["GEMINI_API_KEY"] = api_key_from_secrets
 if "uploaded_key" not in st.session_state:
     st.session_state.uploaded_key = None
 if "images" not in st.session_state:
