@@ -860,9 +860,8 @@ def get_vision_client(json_key_path: Optional[str] = None):
 def _extract_with_vision(img_path: str, client, writing_direction: str = "vertical"):
     """
     Google Cloud Vision で OCR を実行する。
-    writing_direction:
-        "vertical"   → 日本語縦書き想定: document_text_detection
-        "horizontal" → 日本語横書き想定: text_detection
+    縦書き/横書きどちらも document_text_detection を使い、
+    language_hints だけ切り替える。
     """
     from google.cloud import vision
 
@@ -873,13 +872,17 @@ def _extract_with_vision(img_path: str, client, writing_direction: str = "vertic
     direction = (writing_direction or "vertical").lower()
 
     if direction.startswith("h"):
-        # 横書き想定：行ベース寄りの TEXT_DETECTION を利用
+        # 横書き: 日本語＋英語想定
         context = vision.ImageContext(language_hints=["ja", "en"])
-        resp = client.text_detection(image=image, image_context=context)
     else:
-        # 縦書き想定：密な文章向け DOCUMENT_TEXT_DETECTION を利用
+        # 縦書き: 日本語メイン
         context = vision.ImageContext(language_hints=["ja"])
-        resp = client.document_text_detection(image=image, image_context=context)
+
+    # ★ どちらも document_text_detection を使う
+    resp = client.document_text_detection(
+        image=image,
+        image_context=context,
+    )
 
     if resp.error.message:
         raise RuntimeError(resp.error.message)
