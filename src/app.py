@@ -1228,6 +1228,8 @@ if "gemini_model" not in st.session_state:
     st.session_state.gemini_model = os.getenv("GEMINI_MODEL") or "gemini-2.5-pro"
 if st.session_state.gemini_model:
     os.environ["GEMINI_MODEL"] = st.session_state.gemini_model
+if "uploaded_key" not in st.session_state:
+    st.session_state.uploaded_key = None
 if "images" not in st.session_state:
     st.session_state.images = []
 if "ocr_results" not in st.session_state:
@@ -1335,6 +1337,7 @@ if st.session_state.images:
 # Step 3: OCR & info抽出
 st.subheader("Step 3. OCR & info抽出")
 if st.session_state.images:
+    uploaded_key = st.session_state.get("uploaded_key")
     client = get_vision_client(uploaded_key)
     direction = st.session_state.get("writing_direction", "vertical")
     st.caption(f"OCRモード: {'横書き' if direction == 'horizontal' else '縦書き'}")
