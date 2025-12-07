@@ -50,10 +50,6 @@ def _remove_page_header_from_text(text: str, header_text: str) -> str:
 
     return "\n".join(new_lines)
 
-
-
-
-"""画像から Title, Body, Left, Right を抽出して dict で返す"""
 def extract_info_type1(image_path: str, writing_direction: str = "vertical"):
     client = _vision_client_from_secrets()
     with open(image_path, "rb") as f:
@@ -65,29 +61,29 @@ def extract_info_type1(image_path: str, writing_direction: str = "vertical"):
     if not annotations:
         return None
 
+    direction = (writing_direction or "vertical").lower()
+
     # -------------------------
-    # まず全方向共通で boxes を作る
+    # 文字ごとのバウンディングボックス
     # -------------------------
     boxes = []
     for ann in annotations[1:]:
         verts = ann.bounding_poly.vertices
         xs = [v.x for v in verts]
         ys = [v.y for v in verts]
-        boxes.append({
-            "text": ann.description,
-            "left": min(xs), "right": max(xs),
-            "top": min(ys), "bottom": max(ys)
-        })
+        boxes.append(
+            {
+                "text": ann.description,
+                "left": min(xs),
+                "right": max(xs),
+                "top": min(ys),
+                "bottom": max(ys),
+            }
+        )
 
-    # boxes が取れない場合は、とりあえず全文テキストだけ返す
     if not boxes:
-        fta = getattr(response, "full_text_annotation", None)
-        raw_text = ""
-        if fta is not None and getattr(fta, "text", None):
-            raw_text = fta.text
-        else:
-            raw_text = annotations[0].description
-
+        # bbox が取れなかったときは、とりあえず全文だけ返す
+        raw_text = annotations[0].description
         body_text = _post_ocr_cleanup(raw_text or "")
         return {
             "Filename": os.path.basename(image_path),
@@ -98,76 +94,107 @@ def extract_info_type1(image_path: str, writing_direction: str = "vertical"):
         }
 
     # -------------------------
-    # ページ最上段（ヘッダ）を boxes から求める
+    # ページ最上段（ヘッダ）と最下段（ページ番号）
     # -------------------------
     min_top = min(b["top"] for b in boxes)
     title_group = [b for b in boxes if abs(b["top"] - min_top) < 20]
     title_group_sorted = sorted(title_group, key=lambda x: x["left"])
-    header_text = "".join(b["text"] for b in title_group_sorted)  # ← 書籍タイトルなど
-
-    # ページ番号などに使う情報はこのまま再利用（縦書きで使用）
     title_bottom = max(b["bottom"] for b in title_group) if title_group else min_top
+
     max_bottom = max(b["bottom"] for b in boxes)
     page_group = [b for b in boxes if abs(b["bottom"] - max_bottom) < 20]
-    page_top = min(b["top"] for b in page_group)
+    page_top = min(b["top"] for b in page_group) if page_group else max_bottom
+
     img_width = max(b["right"] for b in boxes)
     left_page = [b for b in page_group if b["right"] < img_width / 3]
     right_page = [b for b in page_group if b["left"] > img_width * 2 / 3]
 
-    direction = (writing_direction or "vertical").lower()
+    # -------------------------
+    # Body 部分だけを抽出（ヘッダより下、ページ番号より上）
+    # -------------------------
+    body_group = [
+        b for b in boxes
+        if b["top"] > title_bottom and b["bottom"] < page_top
+    ]
 
-    # =====================================================
-    # ① 横書き：Vision の全文テキストから「ページ最上段の行」を削る
-    # =====================================================
+    def _assemble_horizontal_half(half_boxes):
+        """横書きページの片側を、上→下・左→右でざっくり組み立てる"""
+        if not half_boxes:
+            return ""
+
+        # 行の高さの中央値から「改行しきい値」を決める
+        heights = sorted((b["bottom"] - b["top"]) for b in half_boxes)
+        base_h = heights[len(heights) // 2] if heights else 1
+        line_threshold = max(int(base_h * 0.7), 1)
+
+        # 上→下・左→右で並べる
+        sorted_boxes = sorted(half_boxes, key=lambda b: (b["top"], b["left"]))
+
+        lines = []
+        current_line = []
+        current_top = None
+
+        for b in sorted_boxes:
+            if current_top is None:
+                current_top = b["top"]
+            elif b["top"] - current_top > line_threshold:
+                lines.append("".join(x["text"] for x in current_line))
+                current_line = []
+                current_top = b["top"]
+            current_line.append(b)
+
+        if current_line:
+            lines.append("".join(x["text"] for x in current_line))
+
+        return "\n".join(lines)
+
+    # -------------------------
+    # Body の組み立て
+    # -------------------------
     if direction.startswith("h"):
-        fta = getattr(response, "full_text_annotation", None)
-        if fta is not None and getattr(fta, "text", None):
-            raw_text = fta.text
+        # 横書き: 左ページ ⇒ 右ページ の順でテキストを連結
+        mid_x = img_width / 2.0
+
+        # 中心座標で左右に振り分け（必ずどちらかに入るように）
+        left_body_boxes = []
+        right_body_boxes = []
+        for b in body_group:
+            cx = (b["left"] + b["right"]) / 2.0
+            if cx < mid_x:
+                left_body_boxes.append(b)
+            else:
+                right_body_boxes.append(b)
+
+        left_text = _assemble_horizontal_half(left_body_boxes)
+        right_text = _assemble_horizontal_half(right_body_boxes)
+
+        if left_text and right_text:
+            body_text = left_text + "\n" + right_text
         else:
-            raw_text = annotations[0].description
+            # 片面だけのスクショの場合
+            body_text = left_text or right_text
+    else:
+        # 縦書き: 右→左で列を作る既存ロジック
+        body_sorted = sorted(body_group, key=lambda x: -x["left"])
+        columns = defaultdict(list)
+        for b in body_sorted:
+            col_key = int(b["left"] / 50)
+            columns[col_key].append(b)
 
-        # 一番上の行（header_text）を削る
-        raw_text = _remove_page_header_from_text(raw_text or "", header_text)
+        column_texts = []
+        for col in sorted(columns.keys(), reverse=True):
+            col_boxes = sorted(columns[col], key=lambda b: b["top"])
+            col_text = "".join(b["text"] for b in col_boxes)
+            column_texts.append(col_text)
 
-        body_text = _post_ocr_cleanup(raw_text or "")
+        body_text = "\n".join(column_texts)
 
-        # Body の先頭行をざっくり Title 候補にする（【…】など）
-        lines = [ln for ln in body_text.splitlines() if ln.strip()]
-        title = lines[0].strip("★＊* 　[]") if lines else ""
-
-        return {
-            "Filename": os.path.basename(image_path),
-            "Title": title,
-            "Body": body_text,
-            "Left": "",
-            "Right": "",
-        }
-
-    # =====================================================
-    # ② 縦書き（既存ロジック）：
-    #    ヘッダ行は title_bottom より上なので、そもそも Body からは外れる
-    # =====================================================
-
-    # Body 部分だけを抽出（タイトル行より下、ページ最下部より上）
-    body_group = [b for b in boxes if b["top"] > title_bottom and b["bottom"] < page_top]
-
-    body_sorted = sorted(body_group, key=lambda x: -x["left"])
-    columns = defaultdict(list)
-    for b in body_sorted:
-        col_key = int(b["left"] / 50)
-        columns[col_key].append(b)
-
-    column_texts = []
-    for col in sorted(columns.keys(), reverse=True):
-        col_boxes = sorted(columns[col], key=lambda b: b["top"])
-        col_text = "".join(b["text"] for b in col_boxes)
-        column_texts.append(col_text)
-
-    body_text = "\n".join(column_texts)
+    # 後処理（辞書補正など）
     body_text = _post_ocr_cleanup(body_text)
 
     info = {
         "Filename": os.path.basename(image_path),
+        # Title は最上段のヘッダ（書名など）をそのまま入れておく
         "Title": "".join(b["text"] for b in title_group_sorted),
         "Body": body_text,
         "Left": "".join(b["text"] for b in sorted(left_page, key=lambda x: x["left"])),
