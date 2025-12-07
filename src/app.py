@@ -1348,14 +1348,14 @@ if st.session_state.chapters:
 # Step 6: エクスポート
 st.subheader("Step 6. エクスポート")
 if st.session_state.summaries:
-    st.write("Workspace サービスアカウント（ドメイン全体委任）経由で共有ドライブに直接 Googleドキュメントを作成します。")
+    # st.write("Workspace サービスアカウント（ドメイン全体委任）経由で共有ドライブに直接 Googleドキュメントを作成します。")
     default_book_title = st.session_state.get("book_title_input", "Kindle書籍")
-    default_root = st.session_state.get("drive_root_input", "")
+    default_root = st.session_state.get("drive_root_input", "https://drive.google.com/drive/u/0/folders/0AHm5qiz3v94BUk9PVA")
     book_title_input = st.text_input("書籍タイトル（Googleドキュメント名に使用）", value=default_book_title)
     drive_root_input = st.text_input(
         "共有ドライブの親フォルダURLまたはID",
         value=default_root,
-        placeholder="https://drive.google.com/drive/u/0/folders/1soiMC-Rl1q6RSr8z4DdsDDk07aq6UNeT",
+        # placeholder="https://drive.google.com/drive/u/0/folders/1soiMC-Rl1q6RSr8z4DdsDDk07aq6UNeT",
         help="共有ドライブ内の任意フォルダURLを貼り付けるか、フォルダID文字列を入力してください。",
     )
     st.session_state.book_title_input = book_title_input
