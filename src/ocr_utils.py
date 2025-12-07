@@ -3,6 +3,11 @@ import re
 import glob
 import json
 import unicodedata
+
+import io               # ★ 追加
+import numpy as np      # ★ 追加
+from PIL import Image   # ★ 追加
+
 from collections import defaultdict
 from google.cloud import vision
 from googleapiclient.discovery import build
@@ -21,6 +26,112 @@ def _vision_client_from_secrets():
     if project_id:
         creds = creds.with_quota_project(project_id)
     return vision.ImageAnnotatorClient(credentials=creds)
+
+def _find_center_gutter_x(
+    img: Image.Image,
+    center_band: float = 0.2,
+    white_thresh: int = 245,
+    min_confidence: float = 0.65,
+):
+    """
+    画像中央付近の縦方向の帯だけを見て、
+    「どの列が一番白いか？」＝ 本のノド（ページ境界）を推定する。
+    十分白くない場合は None を返す。
+    """
+    w, h = img.size
+    if w <= 0 or h <= 0:
+        return None
+
+    # 中央 ± center_band/2 の範囲だけを見る
+    band_left = int(w * (0.5 - center_band / 2.0))
+    band_right = int(w * (0.5 + center_band / 2.0))
+    band_left = max(band_left, 0)
+    band_right = min(band_right, w - 1)
+    if band_right - band_left < 5:
+        return None
+
+    gray = img.convert("L")
+    arr = np.array(gray)
+    band = arr[:, band_left:band_right]  # (H, W_band)
+
+    # 列ごとの「白さ」の割合
+    whiteness = (band >= white_thresh).mean(axis=0)
+    if whiteness.size == 0:
+        return None
+
+    # 軽く平滑化してノイズを削る
+    kernel_size = min(15, whiteness.size)
+    if kernel_size <= 1:
+        smoothed = whiteness
+    else:
+        kernel = np.ones(kernel_size) / kernel_size
+        smoothed = np.convolve(whiteness, kernel, mode="same")
+
+    best_idx = int(smoothed.argmax())
+    best_score = float(smoothed[best_idx])
+
+    # ぜんぜん白くない → 見開きとみなさない
+    if best_score < min_confidence:
+        return None
+
+    return band_left + best_idx
+
+
+def _ocr_pil_image(client: vision.ImageAnnotatorClient, img: Image.Image) -> str:
+    """
+    PIL.Image を Vision で OCR して全文テキストを返す。
+    bounding box の組み立てなどはせず、Vision が組んだテキストをそのまま使う。
+    """
+    with io.BytesIO() as buf:
+        img.save(buf, format="PNG")
+        content = buf.getvalue()
+
+    image = vision.Image(content=content)
+    resp = client.document_text_detection(image=image)
+
+    if resp.error.message:
+        raise RuntimeError(f"Vision API error: {resp.error.message}")
+
+    fta = getattr(resp, "full_text_annotation", None)
+    if fta and getattr(fta, "text", None):
+        return fta.text
+
+    anns = getattr(resp, "text_annotations", None) or []
+    if anns:
+        return anns[0].description or ""
+
+    return ""
+
+
+def _extract_horizontal_double_page(image_path: str, img: Image.Image, client):
+    """
+    横書きかつ見開き（中央に白いノドあり）と判定できた場合だけ、
+    画像を 左ページ / 右ページ に分割して OCR する。
+    """
+    gutter_x = _find_center_gutter_x(img)
+    if gutter_x is None:
+        # ノドがはっきり見つからない → 見開き扱いしない
+        return None
+
+    w, h = img.size
+    left_img = img.crop((0, 0, gutter_x, h))
+    right_img = img.crop((gutter_x, 0, w, h))
+
+    left_text_raw = _ocr_pil_image(client, left_img)
+    right_text_raw = _ocr_pil_image(client, right_img)
+
+    # 左 → 右の順に連結 + 既存のクリーニングを適用
+    body_text = (left_text_raw or "") + "\n" + (right_text_raw or "")
+    body_text = _post_ocr_cleanup(body_text)  # 同ファイル内で後ろに定義済み
+
+    return {
+        "Filename": os.path.basename(image_path),
+        "Title": "",
+        "Body": body_text,
+        "Left": "",
+        "Right": "",
+    }
+
 
 def _remove_page_header_from_text(text: str, header_text: str) -> str:
     """ページ最上段（ヘッダ）の文字列をOCR結果から除去する（汎用版）"""
@@ -52,6 +163,21 @@ def _remove_page_header_from_text(text: str, header_text: str) -> str:
 
 def extract_info_type1(image_path: str, writing_direction: str = "vertical"):
     client = _vision_client_from_secrets()
+    direction = (writing_direction or "vertical").lower()
+
+    # ★ 横書きのときだけ「見開き＋左右分割 OCR」を試す
+    if direction.startswith("h"):
+        try:
+            img = Image.open(image_path).convert("RGB")
+        except Exception:
+            img = None
+
+        if img is not None:
+            res = _extract_horizontal_double_page(image_path, img, client)
+            if res is not None:
+                # 見開きと判定できた場合はここで確定（左→右の順で Body に入っている）
+                return res
+
     with open(image_path, "rb") as f:
         content = f.read()
     image = vision.Image(content=content)

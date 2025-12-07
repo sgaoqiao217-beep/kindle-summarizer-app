@@ -17,3 +17,5 @@ protobuf<6  # Vision周りの互換性用にピン留め（念のため）
 
 # Gemini
 google-genai>=0.5.0
+
+numpy>=1.26
